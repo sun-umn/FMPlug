@@ -1,3 +1,4 @@
+# third party
 import torch
 import torch.nn as nn
 
@@ -8,5 +9,5 @@ class SiLU(nn.Module):
     repository so we can reproduce their work.
     """
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x * torch.sigmoid(x)
