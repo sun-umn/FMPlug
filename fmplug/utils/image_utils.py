@@ -4,10 +4,11 @@ import numpy as np
 import scipy
 import torch
 import torch.nn.functional as F
-from fastmri_utils import fft2c_new, ifft2c_new
-from motionblur.motionblur import Kernel
 from torch import nn
 from torch.autograd import Variable
+
+# from fastmri_utils import fft2c_new, ifft2c_new
+# from motionblur.motionblur import Kernel
 
 
 def fft2(x):
@@ -20,18 +21,18 @@ def ifft2(x):
     return torch.fft.ifft2(torch.fft.ifftshift(x, dim=[-1, -2]))
 
 
-def fft2_m(x):
-    """FFT for multi-coil"""
-    if not torch.is_complex(x):
-        x = x.type(torch.complex64)
-    return torch.view_as_complex(fft2c_new(torch.view_as_real(x)))
+# def fft2_m(x):
+#     """FFT for multi-coil"""
+#     if not torch.is_complex(x):
+#         x = x.type(torch.complex64)
+#     return torch.view_as_complex(fft2c_new(torch.view_as_real(x)))
 
 
-def ifft2_m(x):
-    """IFFT for multi-coil"""
-    if not torch.is_complex(x):
-        x = x.type(torch.complex64)
-    return torch.view_as_complex(ifft2c_new(torch.view_as_real(x)))
+# def ifft2_m(x):
+#     """IFFT for multi-coil"""
+#     if not torch.is_complex(x):
+#         x = x.type(torch.complex64)
+#     return torch.view_as_complex(ifft2c_new(torch.view_as_real(x)))
 
 
 def clear_color(x: torch.Tensor) -> np.ndarray:
@@ -298,51 +299,51 @@ def init_kernel_torch(kernel, device="cuda:0"):
     return kernel
 
 
-class Blurkernel(nn.Module):
-    def __init__(self, blur_type="gaussian", kernel_size=31, std=3.0, device=None):
-        super().__init__()
-        self.blur_type = blur_type
-        self.kernel_size = kernel_size
-        self.std = std
-        self.device = device
-        self.seq = nn.Sequential(
-            nn.ReflectionPad2d(self.kernel_size // 2),
-            nn.Conv2d(
-                3, 3, self.kernel_size, stride=1, padding=0, bias=False, groups=3
-            ),
-        )
+# class Blurkernel(nn.Module):
+#     def __init__(self, blur_type="gaussian", kernel_size=31, std=3.0, device=None):
+#         super().__init__()
+#         self.blur_type = blur_type
+#         self.kernel_size = kernel_size
+#         self.std = std
+#         self.device = device
+#         self.seq = nn.Sequential(
+#             nn.ReflectionPad2d(self.kernel_size // 2),
+#             nn.Conv2d(
+#                 3, 3, self.kernel_size, stride=1, padding=0, bias=False, groups=3
+#             ),
+#         )
 
-        self.weights_init()
+#         self.weights_init()
 
-    def forward(self, x):
-        return self.seq(x)
+#     def forward(self, x):
+#         return self.seq(x)
 
-    def weights_init(self):
-        if self.blur_type == "gaussian":
-            n = np.zeros((self.kernel_size, self.kernel_size))
-            n[self.kernel_size // 2, self.kernel_size // 2] = 1
-            k = scipy.ndimage.gaussian_filter(n, sigma=self.std)
-            k = torch.from_numpy(k)
-            self.k = k
-            for name, f in self.named_parameters():
-                f.data.copy_(k)
-        elif self.blur_type == "motion":
-            k = Kernel(
-                size=(self.kernel_size, self.kernel_size), intensity=self.std
-            ).kernelMatrix
-            k = torch.from_numpy(k)
-            self.k = k
-            for name, f in self.named_parameters():
-                f.data.copy_(k)
+#     def weights_init(self):
+#         if self.blur_type == "gaussian":
+#             n = np.zeros((self.kernel_size, self.kernel_size))
+#             n[self.kernel_size // 2, self.kernel_size // 2] = 1
+#             k = scipy.ndimage.gaussian_filter(n, sigma=self.std)
+#             k = torch.from_numpy(k)
+#             self.k = k
+#             for name, f in self.named_parameters():
+#                 f.data.copy_(k)
+#         elif self.blur_type == "motion":
+#             k = Kernel(
+#                 size=(self.kernel_size, self.kernel_size), intensity=self.std
+#             ).kernelMatrix
+#             k = torch.from_numpy(k)
+#             self.k = k
+#             for name, f in self.named_parameters():
+#                 f.data.copy_(k)
 
-    def update_weights(self, k):
-        if not torch.is_tensor(k):
-            k = torch.from_numpy(k).to(self.device)
-        for name, f in self.named_parameters():
-            f.data.copy_(k)
+#     def update_weights(self, k):
+#         if not torch.is_tensor(k):
+#             k = torch.from_numpy(k).to(self.device)
+#         for name, f in self.named_parameters():
+#             f.data.copy_(k)
 
-    def get_kernel(self):
-        return self.k
+#     def get_kernel(self):
+#         return self.k
 
 
 def normalize_axis(x, L):
@@ -378,34 +379,34 @@ def perform_tilt(x, tilt, image_size: int, device):
     return x_deformed
 
 
-def generate_tilt_map(img_h: int, img_w: int, kernel_size: int, device):
-    M = 500
-    N = 32
+# def generate_tilt_map(img_h: int, img_w: int, kernel_size: int, device):
+#     M = 500
+#     N = 32
 
-    u = torch.zeros([img_h, img_w], device=device)
-    v = torch.zeros([img_h, img_w], device=device)
+#     u = torch.zeros([img_h, img_w], device=device)
+#     v = torch.zeros([img_h, img_w], device=device)
 
-    conv = Blurkernel(
-        blur_type="gaussian", kernel_size=kernel_size, std=1.0, device=device
-    ).to(device)
-    kernel = conv.get_kernel().type(torch.float32)
-    kernel = kernel.to(device).view(1, 1, kernel_size, kernel_size)
+#     conv = Blurkernel(
+#         blur_type="gaussian", kernel_size=kernel_size, std=1.0, device=device
+#     ).to(device)
+#     kernel = conv.get_kernel().type(torch.float32)
+#     kernel = kernel.to(device).view(1, 1, kernel_size, kernel_size)
 
-    for _ in range(M):
-        x = np.random.randint(img_h - 2 * N) + N
-        y = np.random.randint(img_h - 2 * N) + N
+#     for _ in range(M):
+#         x = np.random.randint(img_h - 2 * N) + N
+#         y = np.random.randint(img_h - 2 * N) + N
 
-        S = np.random.uniform(0.1, 0.4)
+#         S = np.random.uniform(0.1, 0.4)
 
-        N_u_tmp = torch.randn([2 * N, 2 * N], device=device).view(1, 1, 2 * N, 2 * N)
-        N_u = F.conv2d(N_u_tmp, kernel, padding="same")[0, 0, ...]
-        N_v_tmp = torch.randn([2 * N, 2 * N], device=device).view(1, 1, 2 * N, 2 * N)
-        N_v = F.conv2d(N_v_tmp, kernel, padding="same")[0, 0, ...]
-        u[x - N : x + N, y - N : y + N] += N_u * S
-        v[x - N : x + N, y - N : y + N] += N_v * S
+#         N_u_tmp = torch.randn([2 * N, 2 * N], device=device).view(1, 1, 2 * N, 2 * N)
+#         N_u = F.conv2d(N_u_tmp, kernel, padding="same")[0, 0, ...]
+#         N_v_tmp = torch.randn([2 * N, 2 * N], device=device).view(1, 1, 2 * N, 2 * N)
+#         N_v = F.conv2d(N_v_tmp, kernel, padding="same")[0, 0, ...]
+#         u[x - N : x + N, y - N : y + N] += N_u * S
+#         v[x - N : x + N, y - N : y + N] += N_v * S
 
-    tilt_map = torch.stack((u, v), dim=0).unsqueeze(0)
-    return tilt_map
+#     tilt_map = torch.stack((u, v), dim=0).unsqueeze(0)
+#     return tilt_map
 
 
 class exact_posterior:
