@@ -160,3 +160,20 @@ def count_flops_attn(model, _x, y):
     # the combination of the value vectors.
     matmul_ops = 2 * b * (num_spatial**2) * c
     model.total_ops += torch.DoubleTensor([matmul_ops])
+
+
+# Based on https://github.com/google-research/vdm/blob/main/model_vdm.py
+def base2_fourier_features(
+    inputs: torch.Tensor, start: int = 0, stop: int = 8, step: int = 1
+) -> torch.Tensor:
+    freqs = torch.arange(start, stop, step, device=inputs.device, dtype=inputs.dtype)
+
+    # Create Base 2 Fourier features
+    w = 2.0**freqs * 2 * np.pi
+    w = torch.tile(w[None, :], (1, inputs.size(1)))
+
+    # Compute features
+    h = torch.repeat_interleave(inputs, len(freqs), dim=1)
+    h = w[:, :, None, None] * h
+    h = torch.cat([torch.sin(h), torch.cos(h)], dim=1)
+    return h
