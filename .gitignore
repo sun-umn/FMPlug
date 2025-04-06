@@ -1,0 +1,11 @@
+.ipynb_checkpoints/
+.DS_Store
+__pycache__
+
+# TODO: Ignore all downloaded data
+
+# Ignore notebooks for now as well
+*.ipynb
+
+# Ignore all slurm files
+slurm*
