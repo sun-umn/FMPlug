@@ -3,6 +3,7 @@
 __pycache__
 
 # TODO: Ignore all downloaded data
+*data*
 
 # Ignore notebooks for now as well
 *.ipynb
