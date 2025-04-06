@@ -104,6 +104,8 @@ def train_one_epoch(
                 f"loss = {batch_loss.compute()}, lr = {lr}"
             )
 
+        # TODO: Add back in the evaluation
+
     lr_schedule.step()
     print(f"Number of loss violations: {loss_violation}")
     return {"loss": float(epoch_loss.compute().detach().cpu())}
