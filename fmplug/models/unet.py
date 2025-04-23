@@ -79,8 +79,10 @@ class Upsample(nn.Module):
             )
         else:
             x = F.interpolate(x, scale_factor=2, mode="nearest")
+
         if self.use_conv:
             x = self.conv(x)
+
         return x
 
 
@@ -104,6 +106,7 @@ class Downsample(nn.Module):
             self.op = conv_nd(
                 dims, self.channels, self.out_channels, 3, stride=stride, padding=1
             )
+
         else:
             assert self.channels == self.out_channels
             self.op = avg_pool_nd(dims, kernel_size=stride, stride=stride)

@@ -82,9 +82,9 @@ MODEL_CONFIGS = {
     },
     "celeba": {
         "in_channels": 3,
-        "model_channels": 128,
+        "model_channels": 96,
         "out_channels": 3,
-        "num_res_blocks": 4,
+        "num_res_blocks": 3,
         "attention_resolutions": [2],
         "dropout": 0.3,
         "channel_mult": [2, 2, 2],
