@@ -5,6 +5,7 @@ from typing import Iterable
 
 # third party
 import torch
+import tqdm
 from flow_matching.path import CondOTProbPath
 from torch.nn.parallel import DistributedDataParallel
 from torchmetrics.aggregation import MeanMetric
@@ -40,7 +41,7 @@ def train_one_epoch(
     loss_violation = 0
     path = CondOTProbPath()
 
-    for data_iter_step, (samples, labels) in enumerate(data_loader):
+    for data_iter_step, (samples, labels) in tqdm.tqdm(enumerate(data_loader)):
         if data_iter_step % accum_iter == 0:
             optimizer.zero_grad()
             batch_loss.reset()
@@ -66,7 +67,7 @@ def train_one_epoch(
         x_t = path_sample.x_t
         u_t = path_sample.dx_t
 
-        with torch.cuda.amp.autocast(enabled=True, dtype=torch.float32):
+        with torch.cuda.amp.autocast(enabled=True, dtype=torch.float16):
             model_output = model(x_t, t, extra=conditioning)
             diff = model_output - u_t
             loss = torch.pow(diff, 2).mean()
