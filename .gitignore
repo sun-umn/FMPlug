@@ -1,14 +1,21 @@
 .ipynb_checkpoints/
 .DS_Store
 __pycache__
-*wandb*
-*experiments*
 
-# TODO: Ignore all downloaded data
+# TODO: Ignore directories with large amounts of data
 *data*
+*wandb*
 
 # Ignore notebooks for now as well
 *.ipynb
 
 # Ignore all slurm files
 slurm*
+
+# Ignore downloaded models
+*models*
+
+# Ignore non FMPlug directories
+*bkse*
+*experiments*
+*motionblur*
