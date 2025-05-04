@@ -13,7 +13,7 @@ __pycache__
 slurm*
 
 # Ignore downloaded models
-*models*
+models/*
 
 # Ignore non FMPlug directories
 *bkse*
