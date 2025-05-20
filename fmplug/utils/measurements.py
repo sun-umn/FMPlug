@@ -1,11 +1,15 @@
 # stdlib
 from abc import ABC, abstractmethod
+from functools import partial
 
 # third party
 import numpy as np
 import yaml  # type: ignore
 from torch.nn import functional as F
 from torchvision import torch
+
+# first party
+from fmplug.utils.resizer import Resizer
 
 __OPERATOR__ = {}  # type: ignore
 __NOISE__ = {}  # type: ignore
@@ -63,6 +67,23 @@ class DenoiseOperator(LinearOperator):
 
     def project(self, data):
         return data
+
+
+@register_operator(name="super_resolution")
+class SuperResolutionOperator(LinearOperator):
+    def __init__(self, in_shape, scale_factor, device):
+        self.device = device
+        self.up_sample = partial(F.interpolate, scale_factor=scale_factor)
+        self.down_sample = Resizer(in_shape, 1 / scale_factor).to(device)
+
+    def forward(self, data, **kwargs):
+        return self.down_sample(data)
+
+    def transpose(self, data, **kwargs):
+        return self.up_sample(data)
+
+    def project(self, data, measurement, **kwargs):
+        return data - self.transpose(self.forward(data)) + self.transpose(measurement)
 
 
 @register_operator(name="inpainting")
@@ -128,7 +149,7 @@ class NonlinearBlurOperator(NonLinearOperator):
         """
         Nonlinear deblur requires external codes (bkse).
         """
-        # third party
+        # first party
         from bkse.models.kernel_encoding.kernel_wizard import KernelWizard  # noqa
 
         with open(opt_yml_path, "r") as f:

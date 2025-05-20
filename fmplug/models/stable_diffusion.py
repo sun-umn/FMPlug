@@ -9,8 +9,8 @@ from diffusers import StableDiffusion3Pipeline
 class StableDiffusion3Base:
     def __init__(
         self,
-        model_key: str = 'stabilityai/stable-diffusion-3-medium-diffusers',
-        device='cuda',
+        model_key: str = "stabilityai/stable-diffusion-3-medium-diffusers",
+        device="cuda",
         dtype=torch.float16,
     ):
         self.device = device
@@ -19,6 +19,8 @@ class StableDiffusion3Base:
         pipe = StableDiffusion3Pipeline.from_pretrained(
             model_key, torch_dtype=self.dtype
         )
+        pipe = pipe.to(device)
+        self.pipe = pipe
 
         self.scheduler = pipe.scheduler
 
@@ -30,9 +32,14 @@ class StableDiffusion3Base:
         self.text_enc_3 = pipe.text_encoder_3
 
         self.vae = pipe.vae
-        self.transformer = pipe.transformer
+        self.vae.eval()
+        # self.vae.requires_grad_(False)
+        self.vae.enable_gradient_checkpointing()
+
+        self.transformer = pipe.transformer.to(device)
         self.transformer.eval()
         self.transformer.requires_grad_(False)
+        self.transformer.enable_gradient_checkpointing()
 
         self.vae_scale_factor = (
             2 ** (len(self.vae.config.block_out_channels) - 1)
@@ -45,11 +52,11 @@ class StableDiffusion3Base:
     def encode_prompt(
         self, prompt: List[str], batch_size: int = 1
     ) -> Tuple[torch.Tensor, ...]:
-        '''
+        """
         We assume that
         1. number of tokens < max_length
         2. one prompt for one image
-        '''
+        """
         # CLIP encode (used for modulation of adaLN-zero)
         # now, we have two CLIPs
         text_clip1_ids = self.tokenizer_1(
@@ -57,7 +64,7 @@ class StableDiffusion3Base:
             padding="max_length",
             max_length=77,
             truncation=True,
-            return_tensors='pt',
+            return_tensors="pt",
         ).input_ids
         text_clip1_emb = self.text_enc_1(
             text_clip1_ids.to(self.text_enc_1.device), output_hidden_states=True
@@ -74,7 +81,7 @@ class StableDiffusion3Base:
             padding="max_length",
             max_length=77,
             truncation=True,
-            return_tensors='pt',
+            return_tensors="pt",
         ).input_ids
         text_clip2_emb = self.text_enc_2(
             text_clip2_ids.to(self.text_enc_2.device), output_hidden_states=True
@@ -93,7 +100,7 @@ class StableDiffusion3Base:
             max_length=77,
             truncation=True,
             add_special_tokens=True,
-            return_tensors='pt',
+            return_tensors="pt",
         ).input_ids
         text_t5_emb = self.text_enc_3(text_t5_ids.to(self.text_enc_3.device))[0]
         text_t5_emb = text_t5_emb.to(dtype=self.dtype, device=self.text_enc_3.device)

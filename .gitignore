@@ -17,5 +17,10 @@ models/*
 
 # Ignore non FMPlug directories
 *bkse*
+*diffusers*
 *experiments*
 *motionblur*
+
+# Extra data
+*div2k*
+*output*

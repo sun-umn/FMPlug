@@ -1,0 +1,14 @@
+config:
+  image_size: 768
+  scale_factor: 12
+  num_inference_steps: 5
+  batch_size: 1
+  guidance_scale: 2.0
+  lr: 1.0
+  epochs: 50
+  loss_multiplier: 100.0
+  loss_fn: "l1"
+  max_iter: 20
+  prompt: "a close-up of a red panda's face chewing on bamboo, surrounded by detailed jungle foliage, wildlife photography, National Geographic style"
+  # prompt: "a high quality photo of animal, bush, close-up, fox, grass, green, greenery, hide, panda, red, red panda, stare"
+  # prompt: "a high quality, unclose photo of a red panda's face in the jungle"

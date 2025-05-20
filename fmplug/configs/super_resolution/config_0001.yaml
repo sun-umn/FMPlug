@@ -1,0 +1,12 @@
+config:
+  image_size: 768
+  scale_factor: 12
+  num_inference_steps: 20
+  batch_size: 1
+  guidance_scale: 2.0
+  lr: 1.0
+  epochs: 20
+  loss_multiplier: 100.0
+  loss_fn: "l1"
+  max_iter: 20
+  prompt: "a high quality, unclose photo of a red panda's face in the jungle"

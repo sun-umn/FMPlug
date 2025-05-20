@@ -28,7 +28,7 @@ class CFGScaledModel(ModelWrapper):
         if cfg_scale != 0.0:
             with (
                 torch.cuda.amp.autocast(enabled=True, dtype=torch.float32),
-                torch.no_grad(),
+                #                 torch.no_grad(),
             ):
                 conditional = self.model(x, t, extra={"label": label})
                 condition_free = self.model(x, t, extra={})
@@ -40,7 +40,7 @@ class CFGScaledModel(ModelWrapper):
             # Model is fully conditional, no cfg weighting needed
             with (
                 torch.cuda.amp.autocast(enabled=True, dtype=torch.float32),
-                torch.no_grad(),
+                #                 torch.no_grad(),
             ):
                 result = self.model(
                     x,
