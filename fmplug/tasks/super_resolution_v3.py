@@ -132,7 +132,7 @@ def super_resolution_task(config_name: str) -> None:
 
     # Log into huggingface to be able to pull the SD3.0
     print("Log into HuggingFace ...")
-    login("REMOVED")
+    login("hf_access_token")
 
     # Setup device as cuda
     device = torch.device("cuda")
