@@ -317,6 +317,9 @@ def integrate(
                 noise_pred_text - noise_pred_uncond
             )
 
+        else:
+            noise_pred, noise_pred_text = noise_pred.chunk(2)
+
         # Update step for euler
         # prev_sample = sample + dt * noise_pred
 
@@ -357,13 +360,16 @@ def super_resolution_task(config_name: str) -> None:
     loss_fn = config["loss_fn"]
     max_iter = config["max_iter"]
     prompt = config["prompt"]
+    timesteps_type = config["timesteps_type"]
+    t_start = config["t_start"]
+    t_end = config["t_end"]
 
     # Fix a seed
     set_seed(2009)
 
     # Log into huggingface to be able to pull the SD3.0
     print("Log into HuggingFace ...")
-    login("hf_access_token")
+    login("REMOVED")
 
     # Setup device as cuda
     device = torch.device("cuda")
@@ -391,6 +397,9 @@ def super_resolution_task(config_name: str) -> None:
             "lbfgs_max_iter": max_iter,
             "prompt": prompt,
             "loss_fn": loss_fn,
+            "timesteps_type": timesteps_type,
+            "t_start": t_start,
+            "t_end": t_end,
         },
     )
 
@@ -563,11 +572,14 @@ def super_resolution_task(config_name: str) -> None:
     )
 
     # timesteps = torch.linspace(1000.0, 0.0, num_inference_steps + 1).to(device)
-    timesteps = make_exponential_timesteps(
-        t_start=975.0, t_end=0.05, num_steps=(num_inference_steps + 1), decay=5.0
-    )
+    if timesteps_type == "exponential":
+        timesteps = make_exponential_timesteps(
+            t_start=t_start, t_end=t_end, num_steps=(num_inference_steps + 1), decay=5.0
+        )
+    elif timesteps_type == "linear":
+        timesteps = torch.linspace(t_start, t_end, num_inference_steps + 1).to(device)
+
     timesteps = timesteps.to(device)
-    # timesteps = torch.linspace(925.0, 0.05, num_inference_steps + 1).to(device)
     sigmas = timesteps / 1000.0
     print(timesteps, sigmas)
 
@@ -596,7 +608,7 @@ def super_resolution_task(config_name: str) -> None:
     print("Solve inverse problem ...")
 
     def f(x, t, prompt_embedding, pooled_embedding, device):
-        with torch.amp.autocast(device.type, dtype=torch.float16):
+        with torch.amp.autocast(device.type, dtype=torch.float32):
             # result = vae.decode(x).sample
             # result = vae.encode(result).latent_dist.sample()
 
@@ -639,9 +651,10 @@ def super_resolution_task(config_name: str) -> None:
     optimizer = torch.optim.LBFGS(
         [params_group],
         max_iter=max_iter,
-        history_size=15,
+        history_size=20,
         line_search_fn="strong_wolfe",
     )
+    # scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
 
     def closure():
         # closure_timesteps = torch.clamp(timesteps, 1e-5, 1000.0)
@@ -649,7 +662,7 @@ def super_resolution_task(config_name: str) -> None:
 
         optimizer.zero_grad()
 
-        with (torch.cuda.amp.autocast(enabled=True, dtype=torch.float16),):
+        with (torch.cuda.amp.autocast(enabled=True, dtype=torch.float32),):
             x_t = integrate(
                 f,
                 z,
@@ -713,6 +726,8 @@ def super_resolution_task(config_name: str) -> None:
         decoded_output_holder = [None]  # mutable object to hold output
 
         loss = optimizer.step(closure)
+        # scheduler.step()
+
         losses.append(loss.item())
 
         with torch.no_grad():

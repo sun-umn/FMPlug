@@ -1,12 +1,13 @@
 config:
   image_size: 768
   scale_factor: 12
-  num_inference_steps: 3
+  num_inference_steps: 20
   batch_size: 1
-  guidance_scale: 1.0
+  guidance_scale: 2.0
   lr: 1.0
   epochs: 50
   loss_multiplier: 100.0
   loss_fn: "l1"
-  max_iter: 10
-  prompt: "a high quality, unclose photo of a red panda's face in the jungle"
+  max_iter: 20
+  timesteps_type: "exponential"
+  prompt: "a close-up of a red panda's face chewing on bamboo, surrounded by detailed jungle foliage, wildlife photography, National Geographic style"

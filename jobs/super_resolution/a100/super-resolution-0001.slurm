@@ -13,4 +13,4 @@ echo $PATH
 nvidia-smi
 eval "$(conda shell.bash hook)"
 conda activate materialmind
-python -m cli run-super-resolution-task --config_name="super_resolution/config_0000"
+python -m cli run-super-resolution-task --config_name="super_resolution/config_0001"
