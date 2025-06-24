@@ -16,6 +16,9 @@ def integrate_euler(
     device: torch.device,
     guidance_scale: float = 2.0,
 ):
+    """
+    Function that implements the Euler ode solver.
+    """
     # Start ODE solver
     current_timesteps = timesteps[:-1]
     previous_timesteps = timesteps[1:]

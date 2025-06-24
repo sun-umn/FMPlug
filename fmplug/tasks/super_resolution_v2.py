@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
+import wandb
 import yaml  # type: ignore
 from diffusers import StableDiffusion3Img2ImgPipeline
 from diffusers.models import AutoencoderKL
@@ -17,8 +18,6 @@ from huggingface_hub import login
 from PIL import Image
 from skimage.metrics import peak_signal_noise_ratio
 from torchvision import transforms
-
-import wandb
 
 # first party
 from fmplug.layers.activations import CoordFeatureSiren
@@ -235,7 +234,6 @@ def integrate(
 
         # broadcast to batch dimension in a way that's compatible with ONNX / Core ML
         timestep = t0.expand(latent_model_input.shape[0])
-        prev_timestep = t1.expand(latent_model_input.shape[0])
 
         # upcast to avoid precision issues
         sample = x0.to(torch.float32)
@@ -617,7 +615,8 @@ def super_resolution_task(config_name: str) -> None:
 
     def f(x, t, prompt_embedding, pooled_embedding, device):
         with torch.amp.autocast(device.type, dtype=torch.float16):
-            # result = vae.decode(x).sample
+            # Could we add a decoder and encoder after each step
+            # Can we optimize the measurement in the latent space
             # result = vae.encode(result).latent_dist.sample()
 
             result = transformer(
@@ -628,6 +627,8 @@ def super_resolution_task(config_name: str) -> None:
                 joint_attention_kwargs=None,
                 return_dict=False,
             )[0]
+
+            # result = vae.encode(result).latent_dist.sample()
 
         return result
 
@@ -670,9 +671,7 @@ def super_resolution_task(config_name: str) -> None:
 
         optimizer.zero_grad()
 
-        with (
-            torch.cuda.amp.autocast(enabled=True, dtype=torch.float16),
-        ):
+        with (torch.cuda.amp.autocast(enabled=True, dtype=torch.float16),):
             x_t = integrate(
                 f,
                 z,
