@@ -5,17 +5,20 @@ import random
 from typing import List, Optional, Union
 
 # third party
+import lpips
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import tqdm
-import wandb
 import yaml  # type: ignore
 from diffusers import StableDiffusion3Img2ImgPipeline
+from diffusers.models import AutoencoderKL
 from huggingface_hub import login
 from PIL import Image
 from skimage.metrics import peak_signal_noise_ratio
 from torchvision import transforms
+
+import wandb
 
 # first party
 from fmplug.layers.activations import CoordFeatureSiren
@@ -241,17 +244,8 @@ def integrate(
         # target_std = sample.std()
         dt = sigma_next - sigma
 
-        # # Euler
-        # noise_pred = f(
-        #     x=latent_model_input,
-        #     t=timestep,
-        #     prompt_embedding=prompt_embedding,
-        #     pooled_embedding=pooled_embedding,
-        #     device=device,
-        # )
-
-        # Heun2
-        k1 = f(
+        # Euler
+        noise_pred = f(
             x=latent_model_input,
             t=timestep,
             prompt_embedding=prompt_embedding,
@@ -259,20 +253,29 @@ def integrate(
             device=device,
         )
 
-        # Predict next latent using Euler step
-        x1_pred = latent_model_input + dt * k1
+        # # Heun2
+        # k1 = f(
+        #     x=latent_model_input,
+        #     t=timestep,
+        #     prompt_embedding=prompt_embedding,
+        #     pooled_embedding=pooled_embedding,
+        #     device=device,
+        # )
 
-        # k2
-        k2 = f(
-            x=x1_pred,
-            t=prev_timestep,
-            prompt_embedding=prompt_embedding,
-            pooled_embedding=pooled_embedding,
-            device=device,
-        )
+        # # Predict next latent using Euler step
+        # x1_pred = latent_model_input + dt * k1
 
-        # Heun2 step (average slope)
-        noise_pred = 0.5 * dt * (k1 + k2)
+        # # k2
+        # k2 = f(
+        #     x=x1_pred,
+        #     t=prev_timestep,
+        #     prompt_embedding=prompt_embedding,
+        #     pooled_embedding=pooled_embedding,
+        #     device=device,
+        # )
+
+        # # Heun2 step (average slope)
+        # noise_pred = 0.5 * dt * (k1 + k2)
 
         # # Rk4
         # half_dt = 0.5 * dt
@@ -321,10 +324,10 @@ def integrate(
             noise_pred, noise_pred_text = noise_pred.chunk(2)
 
         # Update step for euler
-        # prev_sample = sample + dt * noise_pred
+        prev_sample = sample + dt * noise_pred
 
         # Update step for huen2
-        prev_sample = sample + noise_pred
+        # prev_sample = sample + noise_pred
 
         prev_sample = prev_sample.to(torch.float32)
         # prev_sample = normalize_z(prev_sample, target_norm=target_norm)
@@ -369,7 +372,7 @@ def super_resolution_task(config_name: str) -> None:
 
     # Log into huggingface to be able to pull the SD3.0
     print("Log into HuggingFace ...")
-    login("hf_access_token")
+    login(os.environ.get("HF_ACCESS_TOKEN"))
 
     # Setup device as cuda
     device = torch.device("cuda")
@@ -450,8 +453,12 @@ def super_resolution_task(config_name: str) -> None:
     y_n = noiser(y)
 
     print("Load in SD3 image to image model ...")
+    # Load in an updated vae
+    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse")
+
     pipe = StableDiffusion3Img2ImgPipeline.from_pretrained(
         "stabilityai/stable-diffusion-3-medium-diffusers",
+        # vae=vae,
         text_encoder_3=None,
         tokenizer_3=None,
         torch_dtype=torch.float32,
@@ -587,6 +594,7 @@ def super_resolution_task(config_name: str) -> None:
     latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
 
     # 5. Prepare latent variables
+    # Prepare latents uses the encoder for SD3
     latents = prepare_latents(
         image,
         latent_timestep,
@@ -608,7 +616,7 @@ def super_resolution_task(config_name: str) -> None:
     print("Solve inverse problem ...")
 
     def f(x, t, prompt_embedding, pooled_embedding, device):
-        with torch.amp.autocast(device.type, dtype=torch.float32):
+        with torch.amp.autocast(device.type, dtype=torch.float16):
             # result = vae.decode(x).sample
             # result = vae.encode(result).latent_dist.sample()
 
@@ -662,7 +670,9 @@ def super_resolution_task(config_name: str) -> None:
 
         optimizer.zero_grad()
 
-        with (torch.cuda.amp.autocast(enabled=True, dtype=torch.float32),):
+        with (
+            torch.cuda.amp.autocast(enabled=True, dtype=torch.float16),
+        ):
             x_t = integrate(
                 f,
                 z,
@@ -758,6 +768,11 @@ def super_resolution_task(config_name: str) -> None:
 
         # Evaluate
         with torch.no_grad():
+            loss_fn = lpips.LPIPS(net="alex").to(
+                device
+            )  # You can also use 'vgg' or 'squeeze'
+            lpips_value = loss_fn(decoded_output, ref_img)
+
             output_numpy = decoded_output.detach().cpu().squeeze().numpy()
             output_numpy = np.clip((output_numpy + 1) / 2, 0, 1)
             output_numpy = np.transpose(
@@ -777,6 +792,7 @@ def super_resolution_task(config_name: str) -> None:
                 "epoch": iterator,
                 "psnr": tmp_psnr,
                 "mse_loss": mse_score,
+                "lpips": lpips_value.item(),
             }
             wandb.log(metrics_to_log)  # type: ignore
 
