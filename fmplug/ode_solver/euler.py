@@ -3,7 +3,6 @@ from typing import Callable
 
 # third party
 import torch
-import tqdm
 
 
 def integrate_euler(
@@ -15,7 +14,7 @@ def integrate_euler(
     pooled_embedding: torch.Tensor,
     device: torch.device,
     guidance_scale: float = 2.0,
-):
+) -> torch.Tensor:
     """
     Function that implements the Euler ode solver.
     """
@@ -34,10 +33,10 @@ def integrate_euler(
 
     do_classifier_free_guidance = guidance_scale > 1.0
 
-    for i, (t0, t1, sigma, sigma_next) in tqdm.tqdm(enumerate(integrate_parameters)):
+    for i, (t0, t1, sigma, sigma_next) in enumerate(integrate_parameters):
         # Print the mean and variance to observe during solving the ode
-        print(x0.mean())
-        print(x0.var())
+        # print(x0.mean())
+        # print(x0.var())
 
         # print(x0.norm(), x0.mean(), x0.var())
         # x0 will be the latent variable
