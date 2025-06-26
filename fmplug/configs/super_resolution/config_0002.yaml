@@ -12,4 +12,4 @@ config:
   timesteps_type: "linear"
   t_start: 999.0
   t_end: 0.05
-  prompt: "a close-up of a red panda's face chewing on bamboo, surrounded by detailed jungle foliage, wildlife photography, National Geographic style"
+  prompt: "a high quality photo of animal, bush, close-up, fox, grass, green, greenery, hide, panda, red, red panda, stare"
