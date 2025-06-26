@@ -35,7 +35,6 @@ def integrate_euler(
     do_classifier_free_guidance = guidance_scale > 1.0
 
     for i, (t0, t1, sigma, sigma_next) in enumerate(integrate_parameters):
-        # Test
         # Print the mean and variance to observe during solving the ode
         # print(x0.mean())
         # print(x0.var())

@@ -1,11 +1,11 @@
 # stdlib
 import inspect
 import os
+import pickle
 import random
 from typing import List, Optional, Union
 
 # third party
-import lpips
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -13,8 +13,6 @@ import tqdm
 import wandb
 import yaml  # type: ignore
 from diffusers import StableDiffusion3Img2ImgPipeline
-from diffusers.models import AutoencoderKL
-from huggingface_hub import login
 from PIL import Image
 from skimage.metrics import peak_signal_noise_ratio
 from torchvision import transforms
@@ -23,6 +21,11 @@ from torchvision import transforms
 from fmplug.layers.activations import CoordFeatureSiren
 from fmplug.losses.losses import PerceptualLossV3
 from fmplug.utils.measurements import get_noise, get_operator
+
+with open(
+    "/scratch.global/wan01530/FMPlug/fmplug/tasks/poly13_model_var_org.pkl", "rb"
+) as f:
+    p_loaded = pickle.load(f)
 
 
 def set_seed(seed):
@@ -202,6 +205,7 @@ def make_exponential_timesteps(t_start=925.0, t_end=0.5, num_steps=5, decay=5.0)
     return timesteps
 
 
+# ODE Solving (inner loop)
 def integrate(
     f,
     x0,
@@ -215,8 +219,12 @@ def integrate(
     # Start ODE solver
     current_timesteps = timesteps[:-1]
     previous_timesteps = timesteps[1:]
+    print("current_timesteps: ", current_timesteps)
+    print("previous_timesteps: ", previous_timesteps)
     current_sigmas = sigmas[:-1]
     previous_sigmas = sigmas[1:]
+    print("current_sigmas: ", current_sigmas)
+    print("previous_sigmas: ", previous_sigmas)
 
     integrate_parameters = zip(
         current_timesteps,
@@ -228,12 +236,14 @@ def integrate(
     do_classifier_free_guidance = guidance_scale > 1.0
 
     for i, (t0, t1, sigma, sigma_next) in enumerate(integrate_parameters):
+        print("t0: ", t0)
+        print("t1: ", t1)
         # print(x0.norm(), x0.mean(), x0.var())
         # x0 will be the latent variable
         latent_model_input = torch.cat([x0] * 2) if do_classifier_free_guidance else x0
-
         # broadcast to batch dimension in a way that's compatible with ONNX / Core ML
         timestep = t0.expand(latent_model_input.shape[0])
+        prev_timestep = t1.expand(latent_model_input.shape[0])
 
         # upcast to avoid precision issues
         sample = x0.to(torch.float32)
@@ -242,17 +252,8 @@ def integrate(
         # target_std = sample.std()
         dt = sigma_next - sigma
 
-        # Euler
-        noise_pred = f(
-            x=latent_model_input,
-            t=timestep,
-            prompt_embedding=prompt_embedding,
-            pooled_embedding=pooled_embedding,
-            device=device,
-        )
-
-        # # Heun2
-        # k1 = f(
+        # # Euler
+        # noise_pred = f(
         #     x=latent_model_input,
         #     t=timestep,
         #     prompt_embedding=prompt_embedding,
@@ -260,20 +261,42 @@ def integrate(
         #     device=device,
         # )
 
-        # # Predict next latent using Euler step
-        # x1_pred = latent_model_input + dt * k1
+        z_var = p_loaded(timestep.clone().detach().cpu().numpy())
+        z_var = torch.tensor(
+            z_var, dtype=latent_model_input.dtype, device=latent_model_input.device
+        ).detach()
+        latent_model_input = (
+            torch.sqrt(z_var / torch.var(latent_model_input, unbiased=False))
+            * latent_model_input
+        )
 
-        # # k2
-        # k2 = f(
-        #     x=x1_pred,
-        #     t=prev_timestep,
-        #     prompt_embedding=prompt_embedding,
-        #     pooled_embedding=pooled_embedding,
-        #     device=device,
-        # )
+        # Heun2
+        k1 = f(
+            x=latent_model_input,
+            t=timestep,
+            prompt_embedding=prompt_embedding,
+            pooled_embedding=pooled_embedding,
+            device=device,
+        )
 
-        # # Heun2 step (average slope)
-        # noise_pred = 0.5 * dt * (k1 + k2)
+        # Predict next latent using Euler step
+        x1_pred = latent_model_input + dt * k1
+
+        z_var = p_loaded(prev_timestep.clone().detach().cpu().numpy())
+        z_var = torch.tensor(z_var, dtype=x1_pred.dtype, device=x1_pred.device).detach()
+        x1_pred = torch.sqrt(z_var / torch.var(x1_pred, unbiased=False)) * x1_pred
+
+        # k2
+        k2 = f(
+            x=x1_pred,
+            t=prev_timestep,
+            prompt_embedding=prompt_embedding,
+            pooled_embedding=pooled_embedding,
+            device=device,
+        )
+
+        # Heun2 step (average slope)
+        noise_pred = 0.5 * dt * (k1 + k2)
 
         # # Rk4
         # half_dt = 0.5 * dt
@@ -322,10 +345,10 @@ def integrate(
             noise_pred, noise_pred_text = noise_pred.chunk(2)
 
         # Update step for euler
-        prev_sample = sample + dt * noise_pred
+        # prev_sample = sample + dt * noise_pred
 
         # Update step for huen2
-        # prev_sample = sample + noise_pred
+        prev_sample = sample + noise_pred
 
         prev_sample = prev_sample.to(torch.float32)
         # prev_sample = normalize_z(prev_sample, target_norm=target_norm)
@@ -340,6 +363,9 @@ def integrate(
         #     j += 1
 
         x0 = prev_sample
+        z_var = p_loaded(prev_timestep.clone().detach().cpu().numpy())
+        z_var = torch.tensor(z_var, dtype=x0.dtype, device=x0.device).detach()
+        x0 = torch.sqrt(z_var / torch.var(x0, unbiased=False)) * x0
 
     return x0
 
@@ -369,14 +395,14 @@ def super_resolution_task(config_name: str) -> None:
     set_seed(2009)
 
     # Log into huggingface to be able to pull the SD3.0
-    print("Log into HuggingFace ...")
-    login(os.environ.get("HF_ACCESS_TOKEN"))
+    # print("Log into HuggingFace ...")
+    # login("hf_access_token")
 
     # Setup device as cuda
     device = torch.device("cuda")
 
     # Global variables for wandb
-    API_KEY = "2080070c4753d0384b073105ed75e1f46669e4bf"
+    API_KEY = "bb47140c09574b488dcf0bc3d92f09d93b6241ce"
     PROJECT_NAME = "FMPlug"
 
     # Enable wandb
@@ -406,9 +432,7 @@ def super_resolution_task(config_name: str) -> None:
 
     # Create the directory to save all of the model results
     wandb_experiment_id = wandb_instance.id
-    save_file_path = (
-        f"/scratch.global/wan01530/FMPlug/experiments/{wandb_experiment_id}"
-    )
+    save_file_path = f"./experiments/{wandb_experiment_id}"
     os.makedirs(save_file_path, exist_ok=True)
 
     gt_img_path = "/scratch.global/wan01530/FMPlug/data/div2k_example.png"
@@ -453,12 +477,8 @@ def super_resolution_task(config_name: str) -> None:
     y_n = noiser(y)
 
     print("Load in SD3 image to image model ...")
-    # Load in an updated vae
-    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse")
-
     pipe = StableDiffusion3Img2ImgPipeline.from_pretrained(
         "stabilityai/stable-diffusion-3-medium-diffusers",
-        # vae=vae,
         text_encoder_3=None,
         tokenizer_3=None,
         torch_dtype=torch.float32,
@@ -486,7 +506,10 @@ def super_resolution_task(config_name: str) -> None:
     # Start the problem by defining z
     # The inputs for the image to image pipeline need to be between
     # 0 and 1
-    z = torch.rand(3, image_size, image_size)
+    z = torch.randn(3, image_size, image_size)
+    # z = y_n
+    # alpha = 0.1
+    # z = torch.sqrt(alpha) * (y_n / 255.) + torch.sqrt(1 - alpha) * torch.randn()
 
     # prompt
     # prompt = "a high quality, unclose photo of a red panda's face in the jungle"
@@ -594,7 +617,6 @@ def super_resolution_task(config_name: str) -> None:
     latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
 
     # 5. Prepare latent variables
-    # Prepare latents uses the encoder for SD3
     latents = prepare_latents(
         image,
         latent_timestep,
@@ -604,6 +626,12 @@ def super_resolution_task(config_name: str) -> None:
         device,
         generator=None,
     )
+
+    # alpha = 0.1
+    # latents = np.sqrt(alpha) * latents +np.sqrt(1 - alpha) * torch.randn_like(latents)
+    # z_var = p_loaded(timesteps[0].clone().detach().cpu().numpy())
+    # z_var = torch.tensor(z_var, dtype=latents.dtype, device=latents.device).detach()
+    # z = torch.sqrt(z_var / torch.var(latents, unbiased=False)) * latents
 
     # NOTE: What happens if this is just random?
     # latents = torch.randn((1, 16, 96, 96)).to(device=device, dtype=torch.float32)
@@ -616,9 +644,8 @@ def super_resolution_task(config_name: str) -> None:
     print("Solve inverse problem ...")
 
     def f(x, t, prompt_embedding, pooled_embedding, device):
-        with torch.amp.autocast(device.type, dtype=torch.float16):
-            # Could we add a decoder and encoder after each step
-            # Can we optimize the measurement in the latent space
+        with torch.amp.autocast(device.type, dtype=torch.float32):
+            # result = vae.decode(x).sample
             # result = vae.encode(result).latent_dist.sample()
 
             result = transformer(
@@ -629,8 +656,6 @@ def super_resolution_task(config_name: str) -> None:
                 joint_attention_kwargs=None,
                 return_dict=False,
             )[0]
-
-            # result = vae.encode(result).latent_dist.sample()
 
         return result
 
@@ -661,8 +686,9 @@ def super_resolution_task(config_name: str) -> None:
 
     optimizer = torch.optim.LBFGS(
         [params_group],
+        lr=1.0,
         max_iter=max_iter,
-        history_size=20,
+        history_size=50,
         line_search_fn="strong_wolfe",
     )
     # scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
@@ -673,7 +699,7 @@ def super_resolution_task(config_name: str) -> None:
 
         optimizer.zero_grad()
 
-        with (torch.cuda.amp.autocast(enabled=True, dtype=torch.float16),):
+        with (torch.cuda.amp.autocast(enabled=True, dtype=torch.float32),):
             x_t = integrate(
                 f,
                 z,
@@ -733,13 +759,6 @@ def super_resolution_task(config_name: str) -> None:
     best_images = []
 
     early_stopping_counter = 0
-
-    print(
-        "Init Opt Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB"
-    )
-    print(
-        "Init Opt Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB"
-    )
     for iterator in tqdm.tqdm(range(epochs)):
         decoded_output_holder = [None]  # mutable object to hold output
 
@@ -776,11 +795,6 @@ def super_resolution_task(config_name: str) -> None:
 
         # Evaluate
         with torch.no_grad():
-            loss_fn = lpips.LPIPS(net="alex").to(
-                device
-            )  # You can also use 'vgg' or 'squeeze'
-            lpips_value = loss_fn(decoded_output, ref_img)
-
             output_numpy = decoded_output.detach().cpu().squeeze().numpy()
             output_numpy = np.clip((output_numpy + 1) / 2, 0, 1)
             output_numpy = np.transpose(
@@ -800,7 +814,6 @@ def super_resolution_task(config_name: str) -> None:
                 "epoch": iterator,
                 "psnr": tmp_psnr,
                 "mse_loss": mse_score,
-                "lpips": lpips_value.item(),
             }
             wandb.log(metrics_to_log)  # type: ignore
 

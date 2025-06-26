@@ -149,7 +149,7 @@ def super_resolution_task() -> None:
     negative_pooled_prompt_embeds = None
     clip_skip = None
     num_images_per_prompt = 1
-    max_sequence_length = 128
+    max_sequence_length = 256
     lora_scale = None
 
     # encode prompt

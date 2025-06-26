@@ -1,6 +1,7 @@
 # stdlib
 import inspect
 import os
+import pickle
 import random
 from typing import List, Optional, Union
 
@@ -13,16 +14,18 @@ import tqdm
 import wandb
 import yaml  # type: ignore
 from diffusers import StableDiffusion3Img2ImgPipeline
-from diffusers.models import AutoencoderKL
-from huggingface_hub import login
 from PIL import Image
 from skimage.metrics import peak_signal_noise_ratio
+from torch.utils.checkpoint import checkpoint
 from torchvision import transforms
 
 # first party
-from fmplug.layers.activations import CoordFeatureSiren
 from fmplug.losses.losses import PerceptualLossV3
 from fmplug.utils.measurements import get_noise, get_operator
+from fmplug.utils.tv_norm import tv_lp_loss
+
+with open("poly13_model_var.pkl", "rb") as f:
+    reg = pickle.load(f)
 
 
 def set_seed(seed):
@@ -159,35 +162,6 @@ def linear_interp(t0, t1, y0, y1, t):
     return y0 + slope * (y1 - y0)
 
 
-def normalize_z(z, target_norm=400.0, eps=1e-8):
-    # z: (B, C, H, W)
-    current_norm = torch.norm(z.view(z.shape[0], -1), dim=1, keepdim=True)  # (B, 1)
-    current_norm = current_norm.view(-1, 1, 1, 1)
-    scale = target_norm / (current_norm + eps)
-    return z * scale
-
-
-def normalize_mean_std(z, eps=1e-8):
-    """
-    Normalize each sample in z to have zero mean and unit variance.
-
-    Args:
-        z (torch.Tensor): Shape (B, C, H, W)
-        eps (float): Small value to avoid division by zero.
-
-    Returns:
-        torch.Tensor: Normalized tensor with mean=0 and std=1 per sample.
-    """
-    mean = z.mean(dim=(1, 2, 3), keepdim=True)
-    std = z.std(dim=(1, 2, 3), keepdim=True)
-    return (z - mean) / (std + eps)
-
-
-def normalize_to(z, target_mean=0.0, target_std=1.0, eps=1e-8):
-    z_normed = normalize_mean_std(z, eps)
-    return z_normed * target_std + target_mean
-
-
 def make_exponential_timesteps(t_start=925.0, t_end=0.5, num_steps=5, decay=5.0):
     s = torch.linspace(0, 1, num_steps + 1)
     decay_values = torch.exp(-decay * s)
@@ -202,78 +176,79 @@ def make_exponential_timesteps(t_start=925.0, t_end=0.5, num_steps=5, decay=5.0)
     return timesteps
 
 
+def normalize_latent(z_x: torch.Tensor, t_x: float):
+    """
+    Normalize z_x at time t_x using interpolated mean and variance per channel.
+    z_x: (B, C, H, W)
+    t_x: scalar (float or 0-dim tensor)
+    """
+    z_var = reg(t_x.detach().cpu().numpy())  # type: ignore
+    z_var = torch.tensor(z_var, dtype=z_x.dtype, device=z_x.device)
+    z_x = torch.sqrt(z_var / torch.var(z_x, unbiased=False)) * z_x
+    return z_x
+
+
 def integrate(
     f,
-    x0,
-    timesteps,
-    sigmas,
+    z,
+    t,
+    NFE,
     prompt_embedding,
     pooled_embedding,
     device,
     guidance_scale: float = 7.0,
+    method: str = "heun2",
 ):
-    # Start ODE solver
-    current_timesteps = timesteps[:-1]
-    previous_timesteps = timesteps[1:]
-    current_sigmas = sigmas[:-1]
-    previous_sigmas = sigmas[1:]
-
-    integrate_parameters = zip(
-        current_timesteps,
-        previous_timesteps,
-        current_sigmas,
-        previous_sigmas,
-    )
-
     do_classifier_free_guidance = guidance_scale > 1.0
+    print("t: ", t)
+    print("NFE: ", NFE)
+    temp_t = 1000 * torch.sigmoid(t)
+    print("temp_t: ", temp_t)
+    delta_t = temp_t / NFE
+    temp_t_next = temp_t - delta_t
 
-    for i, (t0, t1, sigma, sigma_next) in enumerate(integrate_parameters):
-        # print(x0.norm(), x0.mean(), x0.var())
-        # x0 will be the latent variable
-        latent_model_input = torch.cat([x0] * 2) if do_classifier_free_guidance else x0
+    sigma = temp_t / 1000
+    sigma_next = temp_t_next / 1000
+    zt = z  # type: ignore
+    zt = normalize_latent(zt, temp_t)  # type: ignore
 
-        # broadcast to batch dimension in a way that's compatible with ONNX / Core ML
-        timestep = t0.expand(latent_model_input.shape[0])
+    for i in range(NFE):
+        latent_model_input = torch.cat([zt] * 2) if do_classifier_free_guidance else zt
+        time_step = temp_t.expand(latent_model_input.shape[0])  # type: ignore
+        time_step_next = temp_t_next.expand(latent_model_input.shape[0])
+        if method == "euler":
+            noise_pred = f(
+                x=latent_model_input,
+                t=time_step,
+                prompt_embedding=prompt_embedding,
+                pooled_embedding=pooled_embedding,
+                device=device,
+            )
 
-        # upcast to avoid precision issues
-        sample = x0.to(torch.float32)
-        # target_norm = sample.norm()
-        # target_mean = sample.mean()
-        # target_std = sample.std()
-        dt = sigma_next - sigma
+        elif method == "heun2":
+            dt = sigma_next - sigma
+            k1 = f(
+                x=latent_model_input,
+                t=time_step,
+                prompt_embedding=prompt_embedding,
+                pooled_embedding=pooled_embedding,
+                device=device,
+            )
 
-        # Euler
-        noise_pred = f(
-            x=latent_model_input,
-            t=timestep,
-            prompt_embedding=prompt_embedding,
-            pooled_embedding=pooled_embedding,
-            device=device,
-        )
+            # Predict next latent using Euler step
+            x1_pred = latent_model_input + dt * k1
 
-        # # Heun2
-        # k1 = f(
-        #     x=latent_model_input,
-        #     t=timestep,
-        #     prompt_embedding=prompt_embedding,
-        #     pooled_embedding=pooled_embedding,
-        #     device=device,
-        # )
+            # k2
+            k2 = f(
+                x=x1_pred,
+                t=time_step_next,  # type: ignore
+                prompt_embedding=prompt_embedding,
+                pooled_embedding=pooled_embedding,
+                device=device,
+            )
 
-        # # Predict next latent using Euler step
-        # x1_pred = latent_model_input + dt * k1
-
-        # # k2
-        # k2 = f(
-        #     x=x1_pred,
-        #     t=prev_timestep,
-        #     prompt_embedding=prompt_embedding,
-        #     pooled_embedding=pooled_embedding,
-        #     device=device,
-        # )
-
-        # # Heun2 step (average slope)
-        # noise_pred = 0.5 * dt * (k1 + k2)
+            # Heun2 step (average slope)
+            noise_pred = 0.5 * dt * (k1 + k2)
 
         # # Rk4
         # half_dt = 0.5 * dt
@@ -322,62 +297,62 @@ def integrate(
             noise_pred, noise_pred_text = noise_pred.chunk(2)
 
         # Update step for euler
-        prev_sample = sample + dt * noise_pred
+        # prev_sample = sample + dt * noise_pred
 
         # Update step for huen2
-        # prev_sample = sample + noise_pred
+        zt = zt + noise_pred
 
-        prev_sample = prev_sample.to(torch.float32)
-        # prev_sample = normalize_z(prev_sample, target_norm=target_norm)
-        # prev_sample = normalize_to(prev_sample, target_mean=target_mean, target_std=target_std, eps=1e-8)  # noqa
+        temp_t = temp_t - delta_t
+        temp_t_next = temp_t - delta_t
 
-        # NOTE: There was a bug in the notebook and solution is very blurry
-        # and does not provide a good prior. Commenting out for now.
-        # while j < len(timesteps) and t1 >= timesteps[j]:
-        #     solution = linear_interp(
-        #         sigma, sigma_next, sample, prev_sample, timesteps[j]
-        #     )
-        #     j += 1
+        sigma = temp_t / 1000
+        sigma_next = temp_t_next / 1000
+        print("temp_t: ", temp_t)
 
-        x0 = prev_sample
-
-    return x0
+    return zt
 
 
 def super_resolution_task(config_name: str) -> None:
+    # Current memory usage by tensors (in MB)
+    print("Init Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
+    print("Init Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB")
+
     # Load in the configuration
     base_config_path = "/scratch.global/wan01530/FMPlug/fmplug/configs"
     with open(os.path.join(base_config_path, config_name + ".yaml"), "r") as file:
-        config = yaml.safe_load(file)["config"]
+        config_all = yaml.safe_load(file)
 
-    image_size = height = width = config["image_size"]
+    # Now safely access each section
+    config = config_all["fmplug"]
+    noise_config = config_all["noise"]
+
+    image_size = config["img_size"]
+    task = config["task"]
     scale_factor = config["scale_factor"]
-    num_inference_steps = config["num_inference_steps"]
-    batch_size = config["batch_size"]
+    alpha = config["alpha"]
+    NFE = config["NFE"]
     guidance_scale = config["guidance_scale"]
     lr = config["lr"]
+    lr_t_ada = config["lr_t_ada"]
     epochs = config["epochs"]
     loss_multiplier = config["loss_multiplier"]
     loss_fn = config["loss_fn"]
-    max_iter = config["max_iter"]
+    vae_weight = config["vae_weight"]
+    lpips_weight = config["lpips_weight"]
+    TV_reg_weight = config["TV_reg_weight"]
     prompt = config["prompt"]
-    timesteps_type = config["timesteps_type"]
-    t_start = config["t_start"]
     t_end = config["t_end"]
+    data_type = eval(config["data_type"])
 
     # Fix a seed
-    set_seed(2009)
-
-    # Log into huggingface to be able to pull the SD3.0
-    print("Log into HuggingFace ...")
-    login(os.environ.get("HF_ACCESS_TOKEN"))
+    set_seed(123)
 
     # Setup device as cuda
     device = torch.device("cuda")
 
     # Global variables for wandb
-    API_KEY = "2080070c4753d0384b073105ed75e1f46669e4bf"
-    PROJECT_NAME = "FMPlug"
+    API_KEY = "bb47140c09574b488dcf0bc3d92f09d93b6241ce"
+    PROJECT_NAME = "FMPlug-Ada"
 
     # Enable wandb
     print("Initialize Project ...")
@@ -386,21 +361,23 @@ def super_resolution_task(config_name: str) -> None:
     wandb_instance = wandb.init(  # type: ignore
         # set the wandb project where this run will be logged
         project=PROJECT_NAME,
-        tags=["Experimental", "super resolution"],
+        tags=["Experimental", task],
         config={
             "lr": lr,
+            "lr_t_ada": lr_t_ada,
             "epochs": epochs,
             "loss_multiplier": loss_multiplier,
             "image_size": image_size,
             "scale_factor": scale_factor,
-            "num_inference_steps": num_inference_steps,
+            "NFE": NFE,
             "guidance_scale": guidance_scale,
-            "lbfgs_max_iter": max_iter,
             "prompt": prompt,
             "loss_fn": loss_fn,
-            "timesteps_type": timesteps_type,
-            "t_start": t_start,
+            "vae_weight": vae_weight,
+            "lpips_weight": lpips_weight,
+            "TV_reg_weight": TV_reg_weight,
             "t_end": t_end,
+            "data_type": data_type,
         },
     )
 
@@ -426,50 +403,36 @@ def super_resolution_task(config_name: str) -> None:
     ref_numpy = np.array(gt_img)
     x = gt_img * 2.0 - 1.0  # type: ignore
 
-    ref_img = torch.Tensor(x).to(torch.float32).to(device).unsqueeze(0)
+    ref_img = torch.Tensor(x).to(data_type).to(device).unsqueeze(0)
     ref_img.requires_grad = False
 
-    # Super resolution
-    # TODO: make image size configurable
-    config = {
-        "measurement": {
-            "operator": {
-                "name": "super_resolution",
-                "in_shape": (1, 3, image_size, image_size),
-                "scale_factor": scale_factor,
-            },
-            "noise": {"name": "gaussian", "sigma": 0.01},
-        },
+    operator_config = {
+        "operator": {
+            "name": task,
+            "in_shape": (1, 3, image_size, image_size),
+            "scale_factor": scale_factor,
+        }
     }
-
-    measure_config = config["measurement"]
-
     # Initalize operator
-    operator = get_operator(device=device, **measure_config["operator"])  # type: ignore
-    noiser = get_noise(**measure_config["noise"])  # type: ignore
+    operator = get_operator(device=device, **operator_config["operator"])  # type: ignore  # noqa
+    noiser = get_noise(**noise_config)  # type: ignore
 
     # Forward measurement model (Ax + n)
     y = operator.forward(ref_img)
     y_n = noiser(y)
 
     print("Load in SD3 image to image model ...")
-    # Load in an updated vae
-    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse")
-
     pipe = StableDiffusion3Img2ImgPipeline.from_pretrained(
         "stabilityai/stable-diffusion-3-medium-diffusers",
-        # vae=vae,
         text_encoder_3=None,
         tokenizer_3=None,
-        torch_dtype=torch.float32,
+        torch_dtype=data_type,
     )
     pipe = pipe.to(device)
     # pipe.enable_model_cpu_offload()
 
     # Extract different components of the pipeline
     prompt_encoder = pipe.encode_prompt
-    image_processor = pipe.image_processor
-    prepare_latents = pipe.prepare_latents
 
     # Transformer block
     transformer = pipe.transformer
@@ -483,18 +446,6 @@ def super_resolution_task(config_name: str) -> None:
     vae.requires_grad_(False)
     vae.enable_gradient_checkpointing()
 
-    # Start the problem by defining z
-    # The inputs for the image to image pipeline need to be between
-    # 0 and 1
-    z = torch.rand(3, image_size, image_size)
-
-    # prompt
-    # prompt = "a high quality, unclose photo of a red panda's face in the jungle"
-    # prompt_2 = (
-    #     "Ultra-detailed photo of a red panda in the wild, realistic fur, "
-    #     "bright expressive eyes, eating bamboo leaves, DSLR wildlife photography, "
-    #     "bokeh background"
-    # )
     prompt_2 = None
     prompt_3 = None
 
@@ -545,82 +496,64 @@ def super_resolution_task(config_name: str) -> None:
         [negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0
     )
 
-    # preprocess image
-    print("Process image, build timesteps & latent variables ...")
-    image = image_processor.preprocess(z, height=height, width=width)
+    del pipe
+    torch.cuda.empty_cache()
 
-    # 4. Prepare timesteps
-    strength = 0.95
-    mu = None
-    sigmas = None
+    # Current memory usage by tensors (in MB)
+    print(
+        "Model Load Allocated:",
+        round(torch.cuda.memory_allocated(0) / 1024**2, 2),
+        "MB",
+    )
+    print(
+        "Model Load Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB"
+    )
 
-    scheduler_kwargs = {}
-    if pipe.scheduler.config.get("use_dynamic_shifting", None) and mu is None:
-        image_seq_len = (
-            int(height) // pipe.vae_scale_factor // transformer.config.patch_size
-        ) * (int(width) // pipe.vae_scale_factor // transformer.config.patch_size)
-        mu = calculate_shift(
-            image_seq_len,
-            pipe.scheduler.config.get("base_image_seq_len", 256),
-            pipe.scheduler.config.get("max_image_seq_len", 4096),
-            pipe.scheduler.config.get("base_shift", 0.5),
-            pipe.scheduler.config.get("max_shift", 1.16),
+    def encode(image: torch.Tensor) -> torch.Tensor:
+        z = vae.encode(image).latent_dist.sample()
+        z = (z - vae.config.shift_factor) * vae.config.scaling_factor
+        return z
+
+    def decode(z: torch.Tensor) -> torch.Tensor:
+        z = (z / vae.config.scaling_factor) + vae.config.shift_factor
+        return vae.decode(z, return_dict=False)[0]
+
+    # initialize latent
+
+    y_n = y_n.to(device)
+    if "super_resolution" in task:
+        img = y_n.reshape(
+            [
+                1,
+                -1,
+                image_size // int(config["scale_factor"]),
+                image_size // int(config["scale_factor"]),
+            ]
         )
-        scheduler_kwargs["mu"] = mu
+        img = transforms.functional.resize(img, [image_size, image_size])
+    else:
+        img = y_n.reshape([1, -1, image_size, image_size])
+    img = img.to(y_n.dtype)
+    img = img.to(device)
+    with torch.no_grad():
+        z = encode(img)
+        z = np.sqrt(alpha) * z + np.sqrt(1 - alpha) * torch.randn_like(z)
+        z = z.detach()
 
-    elif mu is not None:
-        scheduler_kwargs["mu"] = mu
-    timesteps, num_inference_steps = retrieve_timesteps(
-        pipe.scheduler, num_inference_steps, device, sigmas=sigmas, **scheduler_kwargs
-    )
+    del img
 
-    timesteps, num_inference_steps = pipe.get_timesteps(
-        num_inference_steps, strength, device
-    )
+    z = torch.nn.parameter.Parameter(z, True).to(device)
+    z = z.requires_grad_(True)
+    t_ada = torch.tensor((12.0 * (1 - alpha)) - 6.0).to(device)
+    t_ada = t_ada.requires_grad_(True)
 
-    # timesteps = torch.linspace(1000.0, 0.0, num_inference_steps + 1).to(device)
-    if timesteps_type == "exponential":
-        timesteps = make_exponential_timesteps(
-            t_start=t_start, t_end=t_end, num_steps=(num_inference_steps + 1), decay=5.0
-        )
-    elif timesteps_type == "linear":
-        timesteps = torch.linspace(t_start, t_end, num_inference_steps + 1).to(device)
-
-    timesteps = timesteps.to(device)
-    sigmas = timesteps / 1000.0
-    print(timesteps, sigmas)
-
-    # Prepare the latent timestep so we can build the latent variable
-    latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
-
-    # 5. Prepare latent variables
-    # Prepare latents uses the encoder for SD3
-    latents = prepare_latents(
-        image,
-        latent_timestep,
-        batch_size,
-        num_images_per_prompt,
-        prompt_embeds.dtype,
-        device,
-        generator=None,
-    )
-
-    # NOTE: What happens if this is just random?
-    # latents = torch.randn((1, 16, 96, 96)).to(device=device, dtype=torch.float32)
-    z = torch.nn.parameter.Parameter(latents)
-
-    # amplitude = torch.tensor(torch.pi).to(dtype=torch.float32, device=device)
-    timesteps = torch.nn.parameter.Parameter(timesteps)
+    # amplitude = torch.tensor(torch.pi).to(dtype=data_type, device=device)
 
     # Solve the ODE
     print("Solve inverse problem ...")
 
     def f(x, t, prompt_embedding, pooled_embedding, device):
-        with torch.amp.autocast(device.type, dtype=torch.float16):
-            # Could we add a decoder and encoder after each step
-            # Can we optimize the measurement in the latent space
-            # result = vae.encode(result).latent_dist.sample()
-
+        with torch.amp.autocast(device.type, dtype=data_type):
             result = transformer(
                 hidden_states=x,
                 timestep=t,
@@ -630,9 +563,19 @@ def super_resolution_task(config_name: str) -> None:
                 return_dict=False,
             )[0]
 
-            # result = vae.encode(result).latent_dist.sample()
-
         return result
+
+    def checkpointed_integrate(z):
+        return integrate(
+            f,
+            z,
+            t_ada,
+            NFE,
+            prompt_embedding,
+            pooled_embedding,
+            device,
+            guidance_scale=guidance_scale,
+        )
 
     # Criterion for learning
     if loss_fn == "l1":
@@ -644,145 +587,108 @@ def super_resolution_task(config_name: str) -> None:
     # Setup perceptual loss
     # percep_loss_fn = PerceptualLoss(layers=["relu1_2"]).to(device)
     percep_loss_fn = PerceptualLossV3(layers=["relu1_2"]).to(device)
+    lpips_loss_fn = lpips.LPIPS(net="vgg").to(device)
     # style_loss_fn = StyleLoss(layers=["relu1_2"]).to(device)
     # fft_loss_fn = FFTLoss()
 
-    # Initialize sine activation
-    _ = CoordFeatureSiren(
-        feature_dim=3,
-        hidden_dim=3,
-        out_dim=3,
-        depth=3,
-        omega_0=30.0,
-    ).to(device)
+    L1_tv = tv_lp_loss(pow=1)
+    L2_tv = tv_lp_loss(pow=2)
 
-    # parameter groups for LBFGS
-    params_group = {"params": [z], "lr": lr}
+    params_group1 = {"params": z, "lr": lr}
+    params_group2 = {"params": t_ada, "lr": lr_t_ada}
+    optimizer = torch.optim.AdamW([params_group1, params_group2])
 
-    optimizer = torch.optim.LBFGS(
-        [params_group],
-        max_iter=max_iter,
-        history_size=20,
-        line_search_fn="strong_wolfe",
-    )
-    # scheduler = CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
+    # params = [z, t_ada]
+    # optimizer = torch.optim.LBFGS(params, lr=lr, max_iter=50, history_size=50, line_search_fn="strong_wolfe")  # noqa
 
-    def closure():
-        # closure_timesteps = torch.clamp(timesteps, 1e-5, 1000.0)
-        # closure_sigmas = closure_timesteps / 1000.0
-
-        optimizer.zero_grad()
-
-        with (torch.cuda.amp.autocast(enabled=True, dtype=torch.float16),):
-            x_t = integrate(
-                f,
-                z,
-                timesteps,
-                sigmas,
-                # closure_timesteps,
-                # closure_sigmas,
-                prompt_embedding,
-                pooled_embedding,
-                device,
-                guidance_scale=guidance_scale,
-            )
-            x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
-            decoded_output = vae.decode(x_t.half()).sample
-            # decoded_output = image_processor.denormalize(decoded_output)
-            # decoded_output = (decoded_output * 2.0) - 1.0  # Need to put it in the range of -1 to 1  # noqa
-            # decoded_output = vae.decode(x_t)
-
-        # decoded_output = decoded_output.to(torch.float32)
-        decoded_output = torch.sin(decoded_output.to(torch.float32))
-        decoded_output = decoded_output.to(torch.float32)
-
-        # amplitude = torch.clamp(amplitude, min=0.5)
-        # decoded_output = torch.sin(decoded_output / 2.0)
-        # decoded_output = sine_layer(decoded_output)
-        # decoded_output = torch.clamp(decoded_output, -1.0, 1.0)
-
-        # Output shapes checkout
-        # Verified that outputs are between -1 and 1
-        # print(decoded_output.min(), decoded_output.max())
-
-        # Store for access after step
-        decoded_output_holder[0] = decoded_output.detach()
-
-        operator_decoded_output = operator.forward(decoded_output)
-
-        loss = loss_multiplier * criterion(operator_decoded_output, y_n)
-        # loss = loss_multiplier * criterion(operator_decoded_output, y_input)
-        loss += loss_multiplier * percep_loss_fn(
-            (operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0
-        )
-        # loss += loss_multiplier * style_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)  # noqa
-        # loss += loss_multiplier * fft_loss_fn(operator_decoded_output, y_n)
-
-        loss.backward()
-
-        # print out gradients so we can understand
-        print(z.grad.min(), z.grad.max())
-
-        del x_t
-        torch.cuda.empty_cache()
-
-        return loss
+    decay_factor = 0.95
 
     psnrs = []
     losses = []
     best_images = []
 
-    early_stopping_counter = 0
+    early_stopping_counter = 0  # noqa
 
+    # Current memory usage by tensors (in MB)
     print(
         "Init Opt Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB"
     )
     print(
         "Init Opt Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB"
-    )
+    )  # type: ignore
+    decoded_output = None
     for iterator in tqdm.tqdm(range(epochs)):
-        decoded_output_holder = [None]  # mutable object to hold output
+        print("Iter: ", iterator)
+
+        def closure():
+            nonlocal decoded_output
+            optimizer.zero_grad()
+
+            with (torch.cuda.amp.autocast(enabled=True, dtype=data_type),):
+                # x_t = integrate(
+                #     f,
+                #     z,
+                #     t_ada,
+                #     NFE,
+                #     prompt_embedding,
+                #     pooled_embedding,
+                #     device,
+                #     guidance_scale=guidance_scale,
+                # )
+                x_t = checkpoint(checkpointed_integrate, z)
+                x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
+                decoded_output = vae.decode(x_t).sample
+
+            decoded_output = torch.sin(decoded_output)
+            operator_decoded_output = operator.forward(decoded_output)
+
+            loss = criterion(operator_decoded_output, y_n)
+            loss += vae_weight * criterion(
+                x_t, vae.encode(decoded_output).latent_dist.sample()
+            )
+            # print("y_n: ", y_n.shape)
+            # print("operator_decoded_output: ", operator_decoded_output.shape)
+            # print("percep_loss_fn: ", percep_loss_fn(operator_decoded_output, y_n).shape)  # noqa
+            # loss += lpips_weight * percep_loss_fn(operator_decoded_output, y_n).mean()
+            loss += lpips_weight * percep_loss_fn(
+                (operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0
+            )
+            loss += (
+                TV_reg_weight
+                * L1_tv(decoded_output)
+                / L2_tv(decoded_output)
+                / decoded_output.numel()
+                / 2.0
+            )
+            loss *= loss_multiplier
+
+            loss.backward()
+
+            # print out gradients so we can understand
+            print("gradient z: ", z.grad.min(), z.grad.max())
+            new_lr = lr_t_ada * (decay_factor**iterator)
+            optimizer.param_groups[1]["lr"] = new_lr
+
+            del x_t
+            torch.cuda.empty_cache()
+
+            return loss
 
         loss = optimizer.step(closure)
         # scheduler.step()
 
         losses.append(loss.item())
 
-        with torch.no_grad():
-            x_t = integrate(
-                f,
-                z,
-                timesteps,
-                sigmas,
-                prompt_embedding,
-                pooled_embedding,
-                device,
-                guidance_scale=guidance_scale,
-            )
-            x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
-            decoded_output = vae.decode(x_t.to(torch.float32)).sample
-            decoded_output = torch.sin(decoded_output)
-            # decoded_output = image_processor.denormalize(decoded_output) # Puts in 0 to 1  # noqa
-
-        decoded_output = decoded_output.to(torch.float32)
-
-        # amplitude = torch.clamp(amplitude, min=0.5)
-        # decoded_output = torch.sin(decoded_output / 2.0)
-        # decoded_output = sine_layer(decoded_output)
-        # decoded_output = torch.clamp(decoded_output, -1.0, 1.0)
-        # sigmas = timesteps / 1000.0
-        print(timesteps)
-        print(sigmas)
+        print(
+            "Opt Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB"
+        )
+        print("Opt Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB")
 
         # Evaluate
-        with torch.no_grad():
-            loss_fn = lpips.LPIPS(net="alex").to(
-                device
-            )  # You can also use 'vgg' or 'squeeze'
-            lpips_value = loss_fn(decoded_output, ref_img)
-
-            output_numpy = decoded_output.detach().cpu().squeeze().numpy()
-            output_numpy = np.clip((output_numpy + 1) / 2, 0, 1)
+        with torch.no_grad():  # type: ignore
+            output = decoded_output.detach()  # type: ignore
+            lpips_score = lpips_loss_fn(output, ref_img).mean()
+            output_numpy = np.clip((output.cpu().squeeze().numpy() + 1) / 2, 0, 1)
             output_numpy = np.transpose(
                 output_numpy, (1, 2, 0)
             )  # Keep out for now lets evaluate
@@ -798,9 +704,11 @@ def super_resolution_task(config_name: str) -> None:
 
             metrics_to_log = {
                 "epoch": iterator,
+                "t_ada": (1000 * torch.sigmoid(t_ada)).item(),
+                "loss": loss.item() / loss_multiplier,
                 "psnr": tmp_psnr,
+                "lpips": lpips_score.item(),
                 "mse_loss": mse_score,
-                "lpips": lpips_value.item(),
             }
             wandb.log(metrics_to_log)  # type: ignore
 
@@ -809,13 +717,13 @@ def super_resolution_task(config_name: str) -> None:
             if len(psnrs) == 1 or (len(psnrs) > 1 and tmp_psnr > np.max(psnrs[:-1])):
                 best_img = output_numpy
                 best_images.append(best_img)
-                early_stopping_counter = 0
+                # early_stopping_counter = 0
 
-            else:
-                early_stopping_counter += 1
+            # else:
+            #     early_stopping_counter += 1
 
-            if early_stopping_counter >= 1:
-                break
+            # if early_stopping_counter >= 1:
+            #     break
 
     display_ref_img = ref_numpy.transpose(1, 2, 0)
 
@@ -856,3 +764,10 @@ def super_resolution_task(config_name: str) -> None:
     # Save the raw data as well
     np.save(os.path.join(save_file_path, "ground_truth_image.npy"), display_ref_img)
     np.save(os.path.join(save_file_path, "reconstructed_image.npy"), best_img)
+    # Define where to save
+    os.makedirs(save_file_path, exist_ok=True)  # create the folder if it does not exist
+
+    # Save the file
+    config_filename = os.path.join(save_file_path, "config.yaml")
+    with open(config_filename, "w") as file:
+        yaml.safe_dump(config_all, file, default_flow_style=False)

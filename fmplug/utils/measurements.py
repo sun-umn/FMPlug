@@ -1,4 +1,11 @@
+"""
+This module handles task-dependent operations (A) and noises (n) to
+simulate a measurement y=Ax+n.
+"""
+
 # stdlib
+import os
+import sys
 from abc import ABC, abstractmethod
 from functools import partial
 
@@ -9,10 +16,17 @@ from torch.nn import functional as F
 from torchvision import torch
 
 # first party
+from fmplug.utils.image_utils import Blurkernel, fft2_m, perform_tilt
 from fmplug.utils.resizer import Resizer
+from motionblur.motionblur import Kernel
+
+sys.path.append(os.path.join(os.path.dirname(__file__), "bkse"))
+
+# =================
+# Operation classes
+# =================
 
 __OPERATOR__ = {}  # type: ignore
-__NOISE__ = {}  # type: ignore
 
 
 def register_operator(name: str):
@@ -86,6 +100,54 @@ class SuperResolutionOperator(LinearOperator):
         return data - self.transpose(self.forward(data)) + self.transpose(measurement)
 
 
+@register_operator(name="motion_blur")
+class MotionBlurOperator(LinearOperator):
+    def __init__(self, kernel_size, intensity, device):
+        self.device = device
+        self.kernel_size = kernel_size
+        self.conv = Blurkernel(
+            blur_type="motion", kernel_size=kernel_size, std=intensity, device=device
+        ).to(
+            device
+        )  # should we keep this device term?
+
+        self.kernel = Kernel(size=(kernel_size, kernel_size), intensity=intensity)
+        kernel = torch.tensor(self.kernel.kernelMatrix, dtype=torch.float32)
+        self.conv.update_weights(kernel)
+
+    def forward(self, data, **kwargs):
+        # A^T * A
+        return self.conv(data)
+
+    def transpose(self, data, **kwargs):
+        return data
+
+    def get_kernel(self):
+        kernel = self.conv.get_kernel()
+        return kernel.view(1, 1, self.kernel_size, self.kernel_size)
+
+
+@register_operator(name="gaussian_blur")
+class GaussialBlurOperator(LinearOperator):
+    def __init__(self, kernel_size, intensity, device):
+        self.device = device
+        self.kernel_size = kernel_size
+        self.conv = Blurkernel(
+            blur_type="gaussian", kernel_size=kernel_size, std=intensity, device=device
+        ).to(device)
+        self.kernel = self.conv.get_kernel()
+        self.conv.update_weights(self.kernel.type(torch.float32))
+
+    def forward(self, data, **kwargs):
+        return self.conv(data)
+
+    def transpose(self, data, **kwargs):
+        return data
+
+    def get_kernel(self):
+        return self.kernel.view(1, 1, self.kernel_size, self.kernel_size)
+
+
 @register_operator(name="inpainting")
 class InpaintingOperator(LinearOperator):
     """This operator get pre-defined mask and return masked image."""
@@ -94,10 +156,10 @@ class InpaintingOperator(LinearOperator):
         self.device = device
 
     def forward(self, data, **kwargs):
-        # try:
-        return data * kwargs.get("mask", None).to(self.device)
-        # except:  # noqa
-        #     raise ValueError("Require mask")
+        try:
+            return data * kwargs.get("mask", None).to(self.device)
+        except:  # noqa
+            raise ValueError("Require mask")
 
     def transpose(self, data, **kwargs):
         return data
@@ -128,6 +190,30 @@ class BlindBlurOperator(LinearOperator):
         return b_img
 
 
+@register_operator(name="turbulence")
+class TurbulenceOperator(LinearOperator):
+    def __init__(self, device, **kwargs) -> None:
+        self.device = device
+
+    def forward(self, data, kernel, tilt, **kwargs):
+        tilt_data = perform_tilt(
+            data, tilt, image_size=data.shape[-1], device=data.device
+        )
+        blur_tilt_data = self.apply_kernel(tilt_data, kernel)
+        return blur_tilt_data
+
+    def transpose(self, data, **kwargs):
+        return data
+
+    def apply_kernel(self, data, kernel):
+        b_img = torch.zeros_like(data).to(self.device)
+        for i in range(3):
+            b_img[:, i, :, :] = F.conv2d(
+                data[:, i : i + 1, :, :], kernel, padding="same"
+            )
+        return b_img
+
+
 class NonLinearOperator(ABC):
     @abstractmethod
     def forward(self, data, **kwargs):
@@ -135,6 +221,18 @@ class NonLinearOperator(ABC):
 
     def project(self, data, measurement, **kwargs):
         return data + measurement - self.forward(data)
+
+
+@register_operator(name="phase_retrieval")
+class PhaseRetrievalOperator(NonLinearOperator):
+    def __init__(self, oversample, device):
+        self.pad = int((oversample / 8.0) * 256)
+        self.device = device
+
+    def forward(self, data, **kwargs):
+        padded = F.pad(data, (self.pad, self.pad, self.pad, self.pad))
+        amplitude = fft2_m(padded).abs()
+        return amplitude
 
 
 @register_operator(name="nonlinear_blur")
@@ -150,7 +248,7 @@ class NonlinearBlurOperator(NonLinearOperator):
         Nonlinear deblur requires external codes (bkse).
         """
         # first party
-        from bkse.models.kernel_encoding.kernel_wizard import KernelWizard  # noqa
+        from bkse.models.kernel_encoding.kernel_wizard import KernelWizard
 
         with open(opt_yml_path, "r") as f:
             opt = yaml.safe_load(f)["KernelWizard"]
@@ -168,6 +266,14 @@ class NonlinearBlurOperator(NonLinearOperator):
         blurred = self.blur_model.adaptKernel(data, kernel=self.random_kernel)
         blurred = (blurred * 2.0 - 1.0).clamp(-1, 1)  # [0, 1] -> [-1, 1]
         return blurred
+
+
+# =============
+# Noise classes
+# =============
+
+
+__NOISE__ = {}  # type: ignore
 
 
 def register_noise(name: str):
@@ -221,6 +327,11 @@ class PoissonNoise(Noise):
         """
         Follow skimage.util.random_noise.
         """
+
+        # TODO: set one version of poisson
+
+        # version 3 (stack-overflow)
+        # third party
         data = (data + 1.0) / 2.0
         data = data.clamp(0, 1)
         device = data.device
@@ -231,3 +342,25 @@ class PoissonNoise(Noise):
         data = data * 2.0 - 1.0
         data = data.clamp(-1, 1)
         return data.to(device)
+
+        # version 2 (skimage)
+        # if data.min() < 0:
+        #     low_clip = -1
+        # else:
+        #     low_clip = 0
+
+        # # Determine unique values in iamge & calculate the next power of two
+        # vals = torch.Tensor([len(torch.unique(data))])
+        # vals = 2 ** torch.ceil(torch.log2(vals))
+        # vals = vals.to(data.device)
+
+        # if low_clip == -1:
+        #     old_max = data.max()
+        #     data = (data + 1.0) / (old_max + 1.0)
+
+        # data = torch.poisson(data * vals) / float(vals)
+
+        # if low_clip == -1:
+        #     data = data * (old_max + 1.0) - 1.0
+
+        # return data.clamp(low_clip, 1.0)

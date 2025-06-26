@@ -8,8 +8,12 @@ from torch import nn
 from torch.autograd import Variable
 
 # first party
-# from fastmri_utils import fft2c_new, ifft2c_new
+from fmplug.utils.fastmri_utils import fft2c_new, ifft2c_new
 from motionblur.motionblur import Kernel
+
+"""
+Helper functions for new types of inverse problems
+"""
 
 
 def fft2(x):
@@ -22,32 +26,30 @@ def ifft2(x):
     return torch.fft.ifft2(torch.fft.ifftshift(x, dim=[-1, -2]))
 
 
-# def fft2_m(x):
-#     """FFT for multi-coil"""
-#     if not torch.is_complex(x):
-#         x = x.type(torch.complex64)
-#     return torch.view_as_complex(fft2c_new(torch.view_as_real(x)))
+def fft2_m(x):
+    """FFT for multi-coil"""
+    if not torch.is_complex(x):
+        x = x.type(torch.complex64)
+    return torch.view_as_complex(fft2c_new(torch.view_as_real(x)))
 
 
-# def ifft2_m(x):
-#     """IFFT for multi-coil"""
-#     if not torch.is_complex(x):
-#         x = x.type(torch.complex64)
-#     return torch.view_as_complex(ifft2c_new(torch.view_as_real(x)))
+def ifft2_m(x):
+    """IFFT for multi-coil"""
+    if not torch.is_complex(x):
+        x = x.type(torch.complex64)
+    return torch.view_as_complex(ifft2c_new(torch.view_as_real(x)))
 
 
 def clear_color(x: torch.Tensor) -> np.ndarray:
     if torch.is_complex(x):
-        x = torch.abs(x)
+        x = torch.abs(x)  # type: ignore
 
     if x.shape[1] == 3:
         x = x.detach().cpu().squeeze().numpy()  # type: ignore
-        return normalize_np(np.transpose(x, (1, 2, 0)))  # type: ignore
-
+        return normalize_np(np.transpose(x, (1, 2, 0)))
     elif x.shape[1] == 1:
         x = x.detach().cpu().squeeze().numpy()  # type: ignore
-        return normalize_np(x)  # type: ignore
-
+        return normalize_np(x)
     else:
         raise NotImplementedError
 
@@ -66,13 +68,11 @@ def clear_color2(x: torch.Tensor) -> np.ndarray:
     if x.shape[1] == 3:
         x = x.detach().cpu().squeeze().numpy()  # type: ignore
         x = (x + 1) / 2
-        return np.transpose(x, (1, 2, 0))  # type: ignore
-
+        return np.transpose(x, (1, 2, 0))
     elif x.shape[1] == 1:
         x = x.detach().cpu().squeeze().numpy()  # type: ignore
         x = (x + 1) / 2
         return x  # type: ignore
-
     else:
         raise NotImplementedError
 
@@ -243,8 +243,8 @@ class mask_generator:
     def _retrieve_random(self, img):
         total = self.image_size**2
         # random pixel sampling
-        low, high = self.mask_prob_range  # noqa  # type: ignore
-        prob = np.random.uniform(low, high)
+        l, h = self.mask_prob_range
+        prob = np.random.uniform(l, h)
         mask_vec = torch.ones([1, self.image_size * self.image_size])
         samples = np.random.choice(
             self.image_size * self.image_size, int(total * prob), replace=False
@@ -380,34 +380,50 @@ def perform_tilt(x, tilt, image_size: int, device):
     return x_deformed
 
 
-# def generate_tilt_map(img_h: int, img_w: int, kernel_size: int, device):
-#     M = 500
-#     N = 32
+# def perform_tilt(x, tilt, image_size: int, device):
+#     # if batch dimension exists, squeeze
+#     if len(tilt.shape) == 4:
+#         tilt = tilt.squeeze()
+#     tilt_act = tilt.permute(1, 2, 0)
+#     grid_x, grid_y = torch.tensor(np.meshgrid(range(1, image_size + 1), range(1, image_size + 1))).to(device)  # noqa
+#     tilt_act[:, :, 0] += grid_x
+#     tilt_act[:, :, 1] += grid_y
+#     tilt_act[:, :, 0] = normalize_axis(tilt_act[:, :, 0], image_size)
+#     tilt_act[:, :, 1] = normalize_axis(tilt_act[:, :, 1], image_size)
+#     tilt_act = tilt_act.view(1, image_size, image_size, 2)
+#
+#     x_deformed = F.grid_sample(x, tilt_act, align_corners=True)
+#     return x_deformed
 
-#     u = torch.zeros([img_h, img_w], device=device)
-#     v = torch.zeros([img_h, img_w], device=device)
 
-#     conv = Blurkernel(
-#         blur_type="gaussian", kernel_size=kernel_size, std=1.0, device=device
-#     ).to(device)
-#     kernel = conv.get_kernel().type(torch.float32)
-#     kernel = kernel.to(device).view(1, 1, kernel_size, kernel_size)
+def generate_tilt_map(img_h: int, img_w: int, kernel_size: int, device):
+    M = 500
+    N = 32
 
-#     for _ in range(M):
-#         x = np.random.randint(img_h - 2 * N) + N
-#         y = np.random.randint(img_h - 2 * N) + N
+    u = torch.zeros([img_h, img_w], device=device)
+    v = torch.zeros([img_h, img_w], device=device)
 
-#         S = np.random.uniform(0.1, 0.4)
+    conv = Blurkernel(
+        blur_type="gaussian", kernel_size=kernel_size, std=1.0, device=device
+    ).to(device)
+    kernel = conv.get_kernel().type(torch.float32)
+    kernel = kernel.to(device).view(1, 1, kernel_size, kernel_size)
 
-#         N_u_tmp = torch.randn([2 * N, 2 * N], device=device).view(1, 1, 2 * N, 2 * N)
-#         N_u = F.conv2d(N_u_tmp, kernel, padding="same")[0, 0, ...]
-#         N_v_tmp = torch.randn([2 * N, 2 * N], device=device).view(1, 1, 2 * N, 2 * N)
-#         N_v = F.conv2d(N_v_tmp, kernel, padding="same")[0, 0, ...]
-#         u[x - N : x + N, y - N : y + N] += N_u * S
-#         v[x - N : x + N, y - N : y + N] += N_v * S
+    for _ in range(M):
+        x = np.random.randint(img_h - 2 * N) + N
+        y = np.random.randint(img_h - 2 * N) + N
 
-#     tilt_map = torch.stack((u, v), dim=0).unsqueeze(0)
-#     return tilt_map
+        S = np.random.uniform(0.1, 0.4)
+
+        N_u_tmp = torch.randn([2 * N, 2 * N], device=device).view(1, 1, 2 * N, 2 * N)
+        N_u = F.conv2d(N_u_tmp, kernel, padding="same")[0, 0, ...]
+        N_v_tmp = torch.randn([2 * N, 2 * N], device=device).view(1, 1, 2 * N, 2 * N)
+        N_v = F.conv2d(N_v_tmp, kernel, padding="same")[0, 0, ...]
+        u[x - N : x + N, y - N : y + N] += N_u * S
+        v[x - N : x + N, y - N : y + N] += N_v * S
+
+    tilt_map = torch.stack((u, v), dim=0).unsqueeze(0)
+    return tilt_map
 
 
 class exact_posterior:
@@ -485,3 +501,26 @@ def total_variation_loss(img, weight):
     tv_h = ((img[:, :, 1:, :] - img[:, :, :-1, :]).pow(2)).mean()
     tv_w = ((img[:, :, :, 1:] - img[:, :, :, :-1]).pow(2)).mean()
     return weight * (tv_h + tv_w)
+
+
+if __name__ == "__main__":
+    device = "cuda:0"
+    load_path = "/media/harry/tomo/FFHQ/256/test/00000.png"
+    img = torch.tensor(plt.imread(load_path)[:, :, :3])  # rgb
+    img = torch.permute(img, (2, 0, 1)).view(1, 3, 256, 256).to(device)
+
+    mask_len_range = (32, 128)
+    mask_prob_range = (0.3, 0.7)
+    image_size = 256
+    # mask
+    mask_gen = mask_generator(
+        mask_len_range=mask_len_range,  # type: ignore
+        mask_prob_range=mask_prob_range,
+        image_size=image_size,
+    )
+    mask = mask_gen(img)
+
+    mask = np.transpose(mask.squeeze().cpu().detach().numpy(), (1, 2, 0))
+
+    plt.imshow(mask)
+    plt.show()
