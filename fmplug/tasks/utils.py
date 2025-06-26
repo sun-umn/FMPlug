@@ -4,6 +4,7 @@ from typing import Callable
 # third party
 import torch
 from PIL import Image
+from skimage.metrics import structural_similarity as ssim
 from torchvision import transforms
 
 
@@ -79,3 +80,7 @@ def prepare_super_resolution_measurement(
         "operator": operator,
         "noiser": noiser,
     }
+
+
+def compute_ssim(img1, img2):
+    return ssim(img1, img2, data_range=1.0, channel_axis=0)
