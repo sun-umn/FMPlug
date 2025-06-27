@@ -29,7 +29,7 @@ fmplug:
   vae_weight: 0.0
   lpips_weight: 0.0
   TV_reg_weight: 0.0
-  loss_fn: "mse"
+  loss_fn: "l1"
   data_type: torch.bfloat16
   optimizer_select: "adam"
 

@@ -3,15 +3,17 @@ measurement:
     name: gaussian
     sigma: 0.03
   operator:
-    name: inpainting
-  mask_opt:
-    mask_type: random
-    mask_prob_range: [0.7, 0.7]  # for random
-    image_size: 512
+    name: gaussian_blur
+    kernel_size: 65
+    intensity: 3.0
+  kernel_opt:
+    kernel: gaussian
+    kernel_size: 65
+    intensity: 3.0
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg/"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiments"
   img_size: 512
   scale_factor: 4
 
@@ -20,16 +22,15 @@ fmplug:
   t_end: 0.05
   NFE: 3
   batch_size: 1
-  guidance_scale: 1.0
-  lr: 0.1
-  lr_t_ada: 0.05
-  decay_factor: 0.98
+  guidance_scale: 2.0
+  lr: 0.01
+  lr_t_ada: 2.0
   epochs: 1000
   loss_multiplier: 1.0
   vae_weight: 0.0
-  lpips_weight: 0.0
+  lpips_weight: 1.0
   TV_reg_weight: 0.0
-  loss_fn: "mse"
+  loss_fn: "l1"
   data_type: torch.bfloat16
   optimizer_select: "adam"
 

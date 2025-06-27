@@ -20,16 +20,15 @@ fmplug:
   t_end: 0.05
   NFE: 3
   batch_size: 1
-  guidance_scale: 1.0
-  lr: 0.1
-  lr_t_ada: 0.05
-  decay_factor: 0.98
+  guidance_scale: 2.0
+  lr: 0.01
+  lr_t_ada: 2.0
   epochs: 1000
   loss_multiplier: 1.0
-  vae_weight: 0.0
-  lpips_weight: 0.0
-  TV_reg_weight: 0.0
-  loss_fn: "mse"
+  vae_weight: 1.0
+  lpips_weight: 1.0
+  TV_reg_weight: 0.00001
+  loss_fn: "l1"
   data_type: torch.bfloat16
   optimizer_select: "adam"
 

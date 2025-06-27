@@ -26,6 +26,7 @@ import lpips
 from fmplug.utils.measurements import get_noise, get_operator
 from fmplug.utils.tv_norm import tv_lp_loss
 from fmplug.utils.image_utils import Blurkernel, generate_tilt_map, mask_generator
+from fmplug.utils.var_er import VarianceEarlyStopping
 import pandas as pd
 import cv2
 
@@ -381,6 +382,11 @@ def solve(config_name: str) -> None:
     data_type = eval(fmplug_config["data_type"])
     optimizer_select = fmplug_config["optimizer_select"]
     
+    es_window_size = fmplug_config["es_window_size"]
+    es_var_thresh = fmplug_config["es_var_thresh"]
+    es_min_epochs  = fmplug_config["es_min_epochs"]
+    
+    
     measure_config = config_all['measurement']
     task = measure_config["operator"]["name"]
 
@@ -393,6 +399,7 @@ def solve(config_name: str) -> None:
             tags=["Experimental", task],
             config={
                 "method": method,
+                "otimizer": optimizer_select,
                 "lr": lr,
                 "lr_t_ada": lr_t_ada,
                 "decay_factor": decay_factor,
