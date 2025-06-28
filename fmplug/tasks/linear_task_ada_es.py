@@ -26,7 +26,7 @@ import lpips
 from fmplug.utils.measurements import get_noise, get_operator
 from fmplug.utils.tv_norm import tv_lp_loss
 from fmplug.utils.image_utils import Blurkernel, generate_tilt_map, mask_generator
-from fmplug.utils.var_er import VarianceEarlyStopping
+from fmplug.utils.var_es import VarianceEarlyStopping
 import pandas as pd
 import cv2
 
@@ -39,7 +39,7 @@ scaler = torch.cuda.amp.GradScaler()
 
 # Global variables for wandb
 API_KEY = "bb47140c09574b488dcf0bc3d92f09d93b6241ce"
-PROJECT_NAME = "FMPlug-Ada"
+PROJECT_NAME = "FMPlug-Ada-ES"
 
 # Enable wandb
 print("Initialize Project ...")
@@ -74,142 +74,6 @@ def save_png_cv2(array, path):
 
     cv2.imwrite(path, array)
 
-
-def soft_clamp(x, min_val=0.0, max_val=1000.0, slope=0.01):
-    return min_val + (max_val - min_val) * torch.sigmoid(slope * (x - min_val))
-
-
-# Copied from diffusers.pipelines.flux.pipeline_flux.calculate_shift
-def calculate_shift(
-    image_seq_len,
-    base_seq_len: int = 256,
-    max_seq_len: int = 4096,
-    base_shift: float = 0.5,
-    max_shift: float = 1.15,
-):
-    m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
-    b = base_shift - m * base_seq_len
-    mu = image_seq_len * m + b
-    return mu
-
-
-def retrieve_latents(
-    encoder_output: torch.Tensor,
-    generator: Optional[torch.Generator] = None,
-    sample_mode: str = "sample",
-):
-    if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
-        return encoder_output.latent_dist.sample(generator)
-    elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
-        return encoder_output.latent_dist.mode()
-    elif hasattr(encoder_output, "latents"):
-        return encoder_output.latents
-    else:
-        raise AttributeError("Could not access latents of provided encoder_output")
-
-
-def retrieve_timesteps(
-    scheduler,
-    num_inference_steps: Optional[int] = None,
-    device: Optional[Union[str, torch.device]] = None,
-    timesteps: Optional[List[int]] = None,
-    sigmas: Optional[List[float]] = None,
-    **kwargs,
-):
-    r"""
-    Calls the scheduler's `set_timesteps` method and retrieves
-    timesteps from the scheduler after the call. Handles
-    custom timesteps. Any kwargs will be supplied to `scheduler.set_timesteps`.
-
-    Args:
-        scheduler (`SchedulerMixin`):
-            The scheduler to get timesteps from.
-        num_inference_steps (`int`):
-            The number of diffusion steps used when generating samples
-            with a pre-trained model. If used, `timesteps`
-            must be `None`.
-        device (`str` or `torch.device`, *optional*):
-            The device to which the timesteps should be moved to. If `None`,
-            the timesteps are not moved.
-        timesteps (`List[int]`, *optional*):
-            Custom timesteps used to override the timestep spacing strategy
-            of the scheduler. If `timesteps` is passed,
-            `num_inference_steps` and `sigmas` must be `None`.
-        sigmas (`List[float]`, *optional*):
-            Custom sigmas used to override the timestep spacing strategy of
-            the scheduler. If `sigmas` is passed,
-            `num_inference_steps` and `timesteps` must be `None`.
-
-    Returns:
-        `Tuple[torch.Tensor, int]`: A tuple where the first element is
-        the timestep schedule from the scheduler and the
-        second element is the number of inference steps.
-    """
-    if timesteps is not None and sigmas is not None:
-        raise ValueError(
-            "Only one of `timesteps` or `sigmas` can be passed. "
-            "Please choose one to set custom values"
-        )
-    if timesteps is not None:
-        accepts_timesteps = "timesteps" in set(
-            inspect.signature(scheduler.set_timesteps).parameters.keys()
-        )
-        if not accepts_timesteps:
-            raise ValueError(
-                f"The current scheduler class {scheduler.__class__}'s "
-                "`set_timesteps` does not support custom"
-                f" timestep schedules. Please check whether you are using"
-                "the correct scheduler."
-            )
-        scheduler.set_timesteps(timesteps=timesteps, device=device, **kwargs)
-        timesteps = scheduler.timesteps
-        num_inference_steps = len(timesteps)  # type: ignore
-    elif sigmas is not None:
-        accept_sigmas = "sigmas" in set(
-            inspect.signature(scheduler.set_timesteps).parameters.keys()
-        )
-        if not accept_sigmas:
-            raise ValueError(
-                f"The current scheduler class {scheduler.__class__}'s"
-                "`set_timesteps` does not support custom"
-                f" sigmas schedules. Please check whether"
-                "you are using the correct scheduler."
-            )
-        scheduler.set_timesteps(sigmas=sigmas, device=device, **kwargs)
-        timesteps = scheduler.timesteps
-        num_inference_steps = len(timesteps)
-    else:
-        scheduler.set_timesteps(num_inference_steps, device=device, **kwargs)
-        timesteps = scheduler.timesteps
-    return timesteps, num_inference_steps
-
-
-@torch.compile
-def linear_interp(t0, t1, y0, y1, t):
-    if t == t0:
-        return y0
-
-    if t == t1:
-        return y1
-
-    slope = (t - t0) / (t1 - t0)
-    return y0 + slope * (y1 - y0)
-
-
-def make_exponential_timesteps(t_start=925.0, t_end=0.5, num_steps=5, decay=5.0):
-    s = torch.linspace(0, 1, num_steps + 1)
-    decay_values = torch.exp(-decay * s)
-
-    # Normalize to range [0, 1]
-    decay_values = (decay_values - decay_values[-1]) / (
-        decay_values[0] - decay_values[-1]
-    )
-
-    # Linearly map to [t_end, t_start]
-    timesteps = t_end + (t_start - t_end) * decay_values
-    return timesteps
-
-
 def normalize_latent(z_x: torch.Tensor, t_x: float):
     """
     Normalize z_x at time t_x using interpolated mean and variance per channel.
@@ -220,7 +84,7 @@ def normalize_latent(z_x: torch.Tensor, t_x: float):
     z_var = torch.tensor(z_var, dtype=z_x.dtype, device=z_x.device)
     z_x = torch.sqrt(z_var / torch.var(z_x, unbiased=False)) * z_x
     return z_x
-    
+
 
 def integrate(
     f,
@@ -383,8 +247,9 @@ def solve(config_name: str) -> None:
     optimizer_select = fmplug_config["optimizer_select"]
     
     es_window_size = fmplug_config["es_window_size"]
-    es_var_thresh = fmplug_config["es_var_thresh"]
+    es_patience = fmplug_config["es_patience"]
     es_min_epochs  = fmplug_config["es_min_epochs"]
+    es_delta  = fmplug_config["es_delta"]
     
     
     measure_config = config_all['measurement']
@@ -399,7 +264,7 @@ def solve(config_name: str) -> None:
             tags=["Experimental", task],
             config={
                 "method": method,
-                "otimizer": optimizer_select,
+                "optimizer": optimizer_select,
                 "lr": lr,
                 "lr_t_ada": lr_t_ada,
                 "decay_factor": decay_factor,
@@ -446,7 +311,7 @@ def solve(config_name: str) -> None:
         )
         gt_img = tf(gt_img)
 
-        ref_numpy = np.array(gt_img)
+        ref_numpy = np.array(gt_img).transpose(1, 2, 0)
         x = gt_img * 2.0 - 1.0  # type: ignore
 
         ref_img = torch.Tensor(x).to(data_type).to(device).unsqueeze(0)
@@ -576,6 +441,7 @@ def solve(config_name: str) -> None:
             z = (z/vae.config.scaling_factor) + vae.config.shift_factor
             return vae.decode(z, return_dict=False)[0]
         
+        early_stop_indicator = VarianceEarlyStopping(es_window_size, es_patience, es_min_epochs, es_delta)
 
         # initialize latent
         
@@ -763,7 +629,7 @@ def solve(config_name: str) -> None:
 
         
         for iterator in tqdm.tqdm(range(epochs)):
-            print("Iter: ", iterator)
+            # print("Iter: ", iterator)
             if optimizer_select == "adam":
                 loss = optimizer.step(closure)
                 new_lr = lr_t_ada * (decay_factor ** iterator)
@@ -775,10 +641,10 @@ def solve(config_name: str) -> None:
 
             losses.append(loss.item())
             
-            print("Opt Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
-            print("Opt Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB")
+            # print("Opt Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
+            # print("Opt Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB")
             torch.cuda.empty_cache()
-
+            
             # Evaluate
             with torch.no_grad():
                 output = decoded_output.detach().float()
@@ -790,12 +656,12 @@ def solve(config_name: str) -> None:
 
                 # calculate psnr
                 tmp_psnr = peak_signal_noise_ratio(
-                    ref_numpy.transpose(1, 2, 0), output_numpy
+                    ref_numpy, output_numpy
                 )
-                print(tmp_psnr)
+                # print(tmp_psnr)
 
                 # calculate mse
-                mse_score = ((ref_numpy.transpose(1, 2, 0) - output_numpy) ** 2).mean()
+                mse_score = ((ref_numpy - output_numpy) ** 2).mean()
 
                 metrics_to_log = {
                     "epoch": iterator,
@@ -812,7 +678,7 @@ def solve(config_name: str) -> None:
                 if len(psnrs) == 1 or (len(psnrs) > 1 and tmp_psnr > np.max(psnrs[:-1])):
                     best_img = output_numpy
                     best_images.append(best_img)
-                        # Convert dict to single-row DataFrame
+                    best_epoch = iterator
                 
                 df_new = pd.DataFrame([metrics_to_log])
                 # Append or create
@@ -821,15 +687,60 @@ def solve(config_name: str) -> None:
                     df_new.to_csv(log_path, mode='a', header=False, index=False)
                 else:
                     df_new.to_csv(log_path, mode='w', header=True, index=False)
+                
+                if early_stop_indicator.get_flag() == False:
+                    early_stop_indicator.update(loss.item(), output_numpy)
+                else:
+                    min_index = min(range(len(losses)), key=lambda i: losses[i])
+
+                    es_image = early_stop_indicator.get_images()[min_index]
+
+                    # Create a figure with 1 row, 3 columns
+                    fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(10, 10))
+
+                    # Ground truth
+                    ax1.imshow(ref_numpy)
+                    ax1.set_title("Ground Truth Image")
+                    ax1.axis("off")
+
+                    # Display the corrupted image
+                    y_n_numpy = y_n.squeeze(0).detach().cpu().to(torch.float32).permute(1, 2, 0).numpy()
+                    y_n_numpy = (y_n_numpy + 1.0) / 2.0
+                    ax2.imshow(y_n_numpy)
+                    ax2.set_title("Corrupted Image")
+                    ax2.axis("off")
+
+                    # Reconstructed image
+                    ax3.imshow(es_image.astype(float))
+                    ax3.set_title("Reconstructed Image (FM)")
+                    ax3.axis("off")
+
+                    # Pixel-wise absolute difference (grayscale)
+                    diff = np.abs(ref_numpy - es_image).astype(float).mean(axis=-1)
+                    ax4.imshow(diff, cmap="hot")
+                    ax4.set_title("Pixel Difference (FM)")
+                    ax4.axis("off")
+
+                    # Save the figure
+                    plt.tight_layout()
+                    fig.savefig(
+                        os.path.join(save_dir, rel_dir, f"img_diff_es_{str(iterator-es_window_size+min_index)}.png"),
+                        bbox_inches="tight",
+                    )
+                    plt.close()
+
+                    np.save(os.path.join(save_dir, rel_dir, f"reconstruction_es_{str(iterator-es_window_size+min_index)}.npy"), es_image)
+                    
+                    save_png_cv2(es_image, os.path.join(save_dir, rel_dir, f"reconstruction_es_{str(iterator-es_window_size)}.png"))
+                    break
 
 
-        display_ref_img = ref_numpy.transpose(1, 2, 0)
 
         # Create a figure with 1 row, 3 columns
         fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(10, 10))
 
         # Ground truth
-        ax1.imshow(display_ref_img)
+        ax1.imshow(ref_numpy)
         ax1.set_title("Ground Truth Image")
         ax1.axis("off")
 
@@ -846,7 +757,7 @@ def solve(config_name: str) -> None:
         ax3.axis("off")
 
         # Pixel-wise absolute difference (grayscale)
-        diff = np.abs(display_ref_img - best_img).astype(float).mean(axis=-1)
+        diff = np.abs(ref_numpy - best_img).astype(float).mean(axis=-1)
         ax4.imshow(diff, cmap="hot")
         ax4.set_title("Pixel Difference (FM)")
         ax4.axis("off")
@@ -860,12 +771,12 @@ def solve(config_name: str) -> None:
         plt.close()
 
         # Save the raw data as well
-        np.save(os.path.join(save_dir, rel_dir, "gt.npy"), display_ref_img)
-        np.save(os.path.join(save_dir, rel_dir, "reconstruction.npy"), best_img)
+        np.save(os.path.join(save_dir, rel_dir, "gt.npy"), ref_numpy)
+        np.save(os.path.join(save_dir, rel_dir, f"reconstruction_best_{str(best_epoch)}.npy"), best_img)
         np.save(os.path.join(save_dir, rel_dir, "measurement.npy"), y_n_numpy)
         
-        save_png_cv2(display_ref_img, os.path.join(save_dir, rel_dir, "gt.png"))
-        save_png_cv2(best_img, os.path.join(save_dir, rel_dir, "reconstruction.png"))
+        save_png_cv2(ref_numpy, os.path.join(save_dir, rel_dir, "gt.png"))
+        save_png_cv2(best_img, os.path.join(save_dir, rel_dir, f"reconstruction_best_{str(best_epoch)}.png"))
         save_png_cv2(y_n_numpy, os.path.join(save_dir, rel_dir, "measurement.png"))
         
         with open(os.path.join(save_dir, rel_dir, "prompt.txt"), "w") as file:

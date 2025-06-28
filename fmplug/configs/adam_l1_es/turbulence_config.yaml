@@ -3,13 +3,16 @@ measurement:
     name: gaussian
     sigma: 0.03
   operator:
-    name: super_resolution
-    in_shape: [1, 3, 512, 512]
-    scale_factor: 4
+    name: turbulence
+  kernel_opt: 
+    kernel: gaussian
+    kernel_size: 65
+    intensity: 3.0
+
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg/"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-ES"
   img_size: 512
   scale_factor: 4
 
@@ -20,8 +23,8 @@ fmplug:
   batch_size: 1
   guidance_scale: 2.0
   lr: 0.01
-  lr_t_ada: 0.05
-  decay_factor: 0.98
+  lr_t_ada: 2.0
+  decay_factor: 0.97
   epochs: 1000
   loss_multiplier: 1.0
   vae_weight: 0.0
@@ -31,3 +34,7 @@ fmplug:
   data_type: torch.bfloat16
   optimizer_select: "adam"
 
+  es_window_size: 100
+  es_patience: 50
+  es_min_epochs: 200
+  es_delta: 0.000001
