@@ -15,7 +15,7 @@ from skimage.metrics import peak_signal_noise_ratio
 
 # first party
 from fmplug.ode_solver.euler import integrate_euler
-from fmplug.tasks.utils import compute_ssim, prepare_super_resolution_measurement
+from fmplug.tasks.utils import compute_ssim, prepare_measurement
 from fmplug.utils.measurements import get_noise, get_operator
 
 # These presets are used for torch compile for SD3
@@ -46,7 +46,7 @@ def total_variation_loss(x):
     )
 
 
-def super_resolution_task(config_name: str) -> None:
+def turbulence_task(config_name: str) -> None:
     # Configuration
     image_size = 512
     scale_factor = 4
@@ -101,17 +101,32 @@ def super_resolution_task(config_name: str) -> None:
     # Initialize LPIPS model (use net='vgg' for VGG-based)
     lpips_loss_fn = lpips.LPIPS(net="vgg").to(device)
 
+    # Super turbulence config
+    config = {
+        "measurement": {
+            "operator": {"name": "turbulence"},
+            "noise": {"name": "gaussian", "sigma": 0.03},
+        },
+        "kernel": "gaussian",
+        "kernel_size": 64,
+        "intensity": 3.0,
+    }
+
     # Load in an image & measurement
-    noise_sigma = 0.03
-    img_outputs = prepare_super_resolution_measurement(
+    img_outputs = prepare_measurement(
         image_path="/users/5/dever120/FMPlug/data/div2k_example.png",  # Hardcode for now  # noqa
         image_size=image_size,
-        scale_factor=scale_factor,
-        noise_sigma=noise_sigma,
-        device=device,
+        config=config,
         get_operator_fn=get_operator,
         get_noise_fn=get_noise,
+        device=device,
     )
+
+    # Let's save the turbulence images
+    # measurement_image = img_outputs["y"]
+
+    # # Image is in [-1, 1] need to convert to [0, 1]
+    # measurement_image = (measurement_image + 1.0) / 2.0
 
     print("Load in SD3 image to image model ...")
     # Enable a tiny autoencoder
@@ -334,34 +349,34 @@ def super_resolution_task(config_name: str) -> None:
     print("Staring compile warmup ...")
     noise = torch.randn(z.shape, generator=None, dtype=dtype, layout=None).to(device)
 
-    with torch.no_grad():
-        for _ in range(3):
-            x_t = integrate_euler(
-                f=f,
-                x0=z,
-                timesteps=timesteps,
-                sigmas=sigmas,
-                prompt_embedding=prompt_embedding,
-                pooled_embedding=pooled_embedding,
-                device=device,
-                guidance_scale=guidance_scale,
-            )
+    # with torch.no_grad():
+    #     for _ in range(3):
+    #         x_t = integrate_euler(
+    #             f=f,
+    #             x0=z,
+    #             timesteps=timesteps,
+    #             sigmas=sigmas,
+    #             prompt_embedding=prompt_embedding,
+    #             pooled_embedding=pooled_embedding,
+    #             device=device,
+    #             guidance_scale=guidance_scale,
+    #         )
 
-            # Implment steps to rescale x_t
-            last_sigma = sigmas[-1]
+    #         # Implment steps to rescale x_t
+    #         last_sigma = sigmas[-1]
 
-            # Step 1: Add noise inverse
-            decoded_latent = (x_t - last_sigma * noise) / (1 - last_sigma)
+    #         # Step 1: Add noise inverse
+    #         decoded_latent = (x_t - last_sigma * noise) / (1 - last_sigma)
 
-            # Step 2: Add shift and scale inverse
-            decoded_latent = (
-                decoded_latent / vae.config.scaling_factor
-            ) + vae.config.shift_factor
+    #         # Step 2: Add shift and scale inverse
+    #         decoded_latent = (
+    #             decoded_latent / vae.config.scaling_factor
+    #         ) + vae.config.shift_factor
 
-            # Step 3: Decode using VAE / AE - this output is [-1, 1]
-            decoded_output = torch.clamp(vae.decode(decoded_latent).sample, -1.0, 1.0)
+    #         # Step 3: Decode using VAE / AE - this output is [-1, 1]
+    #         decoded_output = torch.clamp(vae.decode(decoded_latent).sample, -1.0, 1.0)
 
-    print("Ending compile warmup ...")
+    # print("Ending compile warmup ...")
     noise = torch.randn(z.shape, generator=None, dtype=dtype, layout=None).to(device)
     lpips_scores = []
     early_stopping_criterion = 0
@@ -402,13 +417,25 @@ def super_resolution_task(config_name: str) -> None:
         decoded_output = torch.clamp(vae.decode(decoded_latent).sample, -1.0, 1.0)
 
         # Now apply the degradation
-        operator_decoded_output = operator.forward(decoded_output)
+        operator_decoded_output = operator.forward(decoded_output)  # type: ignore
 
         # Apply the loss function - this expects [-1, 1]
+        mse_loss = criterion(operator_decoded_output, y_n)
         lpips_loss = lpips_loss_fn(operator_decoded_output, y_n)
         tv_loss = total_variation_loss(decoded_output)
 
-        loss = criterion(operator_decoded_output, y_n) + lpips_loss + 0.1 * tv_loss
+        # What if we also wanted to measure mse in the latent space?
+        # We would want to prepare the latents based on the last time
+        # step
+        # Why are we using the last timestep to encode? This is because
+        # We will add minimum noise to encode the measurment
+        latent_y_n = vae.encode(y_n).latents
+
+        # Encode the degraded output
+        latent_operator_decoded_output = vae.encode(operator_decoded_output).latents
+        latent_mse = criterion(latent_operator_decoded_output, latent_y_n)
+
+        loss = mse_loss + latent_mse + lpips_loss + 0.1 * tv_loss
 
         # Update gradients of z
         scaler.scale(loss).backward()
@@ -435,8 +462,8 @@ def super_resolution_task(config_name: str) -> None:
             model_img = model_img.squeeze(0).detach().cpu().numpy()  # type: ignore
 
             img = img_outputs.get("ref_img")
-            img = (img + 1.0) / 2.0
-            img = img.squeeze(0).detach().cpu().numpy()
+            img = (img + 1.0) / 2.0  # type: ignore
+            img = img.squeeze(0).detach().cpu().numpy()  # type: ignore
 
             ssim_score = compute_ssim(
                 img,
@@ -481,6 +508,7 @@ def super_resolution_task(config_name: str) -> None:
                 save_file_path, f"reference_vs_generated_image_epoch_{idx + 1}.png"
             )
             fig.savefig(image_save_path, bbox_inches="tight")
+            plt.close(fig)
 
             if current_lpips <= best_lpips:
                 # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 10))

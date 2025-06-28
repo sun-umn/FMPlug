@@ -2,7 +2,7 @@
 import click
 
 # first party
-from fmplug.tasks.super_resolution_ada import super_resolution_task
+from fmplug.tasks.super_resolution_v1 import super_resolution_task
 
 
 @click.group()

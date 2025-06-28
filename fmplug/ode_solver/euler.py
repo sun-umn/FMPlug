@@ -47,7 +47,7 @@ def integrate_euler(
         timestep = t0.expand(latent_model_input.shape[0])
 
         # upcast to avoid precision issues
-        sample = x0.to(torch.float32)
+        sample = x0
         dt = sigma_next - sigma
 
         # Euler
@@ -76,7 +76,7 @@ def integrate_euler(
         # Update step for euler
         prev_sample = sample + dt * noise_pred
 
-        prev_sample = prev_sample.to(torch.float32)
+        # prev_sample = prev_sample
 
         x0 = prev_sample
 
