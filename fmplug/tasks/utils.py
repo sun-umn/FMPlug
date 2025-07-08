@@ -148,6 +148,7 @@ def prepare_measurement(
             kernel_size=tilt_kernel_size,
             device=device,
         )
+        tilt = torch.clip(tilt, -2.5, 2.5)
 
         # Blur kernel
         conv = Blurkernel(
@@ -174,6 +175,7 @@ def prepare_measurement(
         "operator": operator,
         "noiser": noiser,
         "kernel": kernel,
+        "kernel_size": kernel_size,
         "tilt": tilt,  # type: ignore
     }
 

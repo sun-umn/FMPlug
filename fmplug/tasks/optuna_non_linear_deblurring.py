@@ -1,14 +1,11 @@
-# type: ignore
-
 # stdlib
 import os
 import random
-import time
 
 # third party
 import lpips
-import matplotlib.pyplot as plt
 import numpy as np
+import optuna
 import torch
 import tqdm
 import wandb
@@ -20,13 +17,13 @@ from fmplug.ode_solver.euler import integrate_euler
 from fmplug.tasks.utils import compute_ssim, prepare_measurement
 from fmplug.utils.measurements import get_noise, get_operator
 
-# # These presets are used for torch compile for SD3
-# torch.set_float32_matmul_precision("high")
+# These presets are used for torch compile for SD3
+torch.set_float32_matmul_precision("high")
 
-# torch._inductor.config.conv_1x1_as_mm = True
-# torch._inductor.config.coordinate_descent_tuning = True
-# torch._inductor.config.epilogue_fusion = False
-# torch._inductor.config.coordinate_descent_check_all_directions = True
+torch._inductor.config.conv_1x1_as_mm = True
+torch._inductor.config.coordinate_descent_tuning = True
+torch._inductor.config.epilogue_fusion = False
+torch._inductor.config.coordinate_descent_check_all_directions = True
 
 
 def set_seed(seed):
@@ -48,26 +45,7 @@ def total_variation_loss(x):
     )
 
 
-def turbulence_task(config_name: str) -> None:
-    # Configuration
-    image_size = 512
-    scale_factor = 4
-    num_inference_steps = 3
-    batch_size = 1
-    guidance_scale = 2.0
-    optimizer_name = "Adam"
-    lr = 1e-2
-    weight_decay = 0.0
-    epochs = 10000
-    dtype = torch.float32
-
-    # NOTE: Seed was 123
-    set_seed(123)
-
-    # Log into huggingface to be able to pull the SD3.0
-    # print("Log into HuggingFace ...")
-    # login(os.environ.get("HF_ACCESS_TOKEN"))
-
+def optunized_non_linear_deblurring() -> None:
     # Global variables for wandb
     API_KEY = os.environ.get("WANDB_API_KEY")
     PROJECT_NAME = "FMPlug"
@@ -79,17 +57,8 @@ def turbulence_task(config_name: str) -> None:
     wandb_instance = wandb.init(  # type: ignore
         # set the wandb project where this run will be logged
         project=PROJECT_NAME,
-        tags=["Experimental", "BID With Turbulence"],
-        config={
-            "optimizer_name": optimizer_name,
-            "lr": lr,
-            "weight_decay": weight_decay,
-            "epochs": epochs,
-            "image_size": image_size,
-            "scale_factor": scale_factor,
-            "num_inference_steps": num_inference_steps,
-            "guidance_scale": guidance_scale,
-        },
+        tags=["Optunized Non-linear Deblurring"],
+        config={},
     )
 
     # Create the directory to save all of the model results
@@ -97,23 +66,44 @@ def turbulence_task(config_name: str) -> None:
     save_file_path = f"/users/5/dever120/FMPlug/experiments/{wandb_experiment_id}"
     os.makedirs(save_file_path, exist_ok=True)
 
+    study = optuna.create_study()
+    study.optimize(non_linear_deblurring_task, n_trials=3)  # type: ignore
+
+
+def non_linear_deblurring_task(trial) -> None:
+    # Configuration
+    # Optunized variables
+    num_inference_steps = trial.suggest_int("num_inference_steps", 5, 10)
+    lr = trial.suggest_float("lr", 1e-3, 1.0)
+    gradient_clipping_norm = trial.suggest_float("gradient_clipping_norm", 0.01, 0.3)
+    lpips_weight = trial.suggest_float("lpips_weight", 0.05, 1.0)
+
+    image_size = 256
+    batch_size = 1
+    guidance_scale = 2.0
+    optimizer_name = "Adam"
+    weight_decay = 0.0
+    epochs = 2500
+    dtype = torch.float32
+
+    # NOTE: Seed was 123
+    set_seed(123)
+
     # Setup device as cuda
     device = torch.device("cuda")
 
     # Initialize LPIPS model (use net='vgg' for VGG-based)
     lpips_loss_fn = lpips.LPIPS(net="vgg").to(device)
 
-    # Super turbulence config
-    # NOTE: When the images are larger we need to increase the intensity to keep
-    # the degredation equivalent
+    # non-linear deblurring config
     config = {
         "measurement": {
-            "operator": {"name": "turbulence"},
+            "operator": {
+                "name": "nonlinear_blur",
+                "opt_yml_path": "./bkse/options/generate_blur/default.yml",
+            },
             "noise": {"name": "gaussian", "sigma": 0.03},
-        },
-        "kernel": "gaussian",
-        "kernel_size": 64,
-        "intensity": 3.0,
+        }
     }
 
     # Load in an image & measurement
@@ -157,8 +147,8 @@ def turbulence_task(config_name: str) -> None:
     #     pipe.vae.decode, mode="max-autotune", fullgraph=True
     # )
 
-    pipe.transformer = torch.compile(pipe.transformer, mode="default", fullgraph=True)
-    pipe.vae.decode = torch.compile(pipe.vae.decode, mode="default", fullgraph=True)
+    # pipe.transformer = torch.compile(pipe.transformer, mode="default", fullgraph=True)
+    # pipe.vae.decode = torch.compile(pipe.vae.decode, mode="default", fullgraph=True)
 
     # Extract different components of the pipeline
     prompt_encoder = pipe.encode_prompt
@@ -298,36 +288,12 @@ def turbulence_task(config_name: str) -> None:
     z = torch.nn.parameter.Parameter(z)
     z = z.to(device=device, dtype=dtype)
 
-    # We need to set additional training variables
-    kernel_size = img_outputs["kernel_size"]
-    trainable_kernel = torch.randn(  # type: ignore
-        (1, kernel_size * kernel_size),
-        device=device,
-        dtype=dtype,
-        requires_grad=True,  # type: ignore  # noqa
-    )
-
-    # NOTE: Image size here was 256
-    tilt_size = image_size
-    trainable_tilt = torch.randn(1, 2, tilt_size, tilt_size, device=device) * 0.01
-    trainable_tilt.requires_grad = True
-
-    z_params = {"params": z, "lr": lr}
-
-    lrk = 1.0
-    lrt = 1e-4
-    kernel_params = {"params": trainable_kernel, "lr": lrk}
-    tilt_params = {"params": trainable_tilt, "lr": lrt}
-
     # Setup optimizer
-    optimizer: torch.optim.Adam | torch.optim.AdamW | None = None
     if optimizer_name == "Adam":
-        optimizer = torch.optim.Adam([z_params, kernel_params, tilt_params])
+        optimizer = torch.optim.Adam([z], lr=lr)
 
     elif optimizer_name == "AdamW":
-        optimizer = torch.optim.AdamW(
-            [z_params, kernel_params, tilt_params], weight_decay=weight_decay
-        )
+        optimizer = torch.optim.AdamW([z], lr=lr, weight_decay=weight_decay)  # type: ignore  # noqa
 
     # Export the measurment operator
     operator = img_outputs["operator"]
@@ -337,6 +303,18 @@ def turbulence_task(config_name: str) -> None:
 
     # Try the grad scaler for fp16
     scaler = torch.amp.GradScaler()
+
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #     optimizer,
+    #     max_lr=lr,  # Peak learning rate
+    #     steps_per_epoch=1,
+    #     epochs=epochs,  # Total number of epochs
+    #     pct_start=0.05,  # % of total steps for warmup (default = 30%)
+    #     anneal_strategy="linear",  # Use cosine annealing
+    #     cycle_momentum=False,  # If using AdamW or Adam
+    #     final_div_factor=1e4,  # make this the same as initial
+    #     div_factor=25.0,
+    # )
 
     # Function for integration
     # @torch.compile
@@ -353,12 +331,44 @@ def turbulence_task(config_name: str) -> None:
 
         return result
 
-    # Build noise and variables for training
+    # Should we try a compile warmup here -
+    # z will not be updated as long as we are not updating
+    print("Staring compile warmup ...")
+    noise = torch.randn(z.shape, generator=None, dtype=dtype, layout=None).to(device)
+
+    # with torch.no_grad():
+    #     for _ in range(3):
+    #         x_t = integrate_euler(
+    #             f=f,
+    #             x0=z,
+    #             timesteps=timesteps,
+    #             sigmas=sigmas,
+    #             prompt_embedding=prompt_embedding,
+    #             pooled_embedding=pooled_embedding,
+    #             device=device,
+    #             guidance_scale=guidance_scale,
+    #         )
+
+    #         # Implment steps to rescale x_t
+    #         last_sigma = sigmas[-1]
+
+    #         # Step 1: Add noise inverse
+    #         decoded_latent = (x_t - last_sigma * noise) / (1 - last_sigma)
+
+    #         # Step 2: Add shift and scale inverse
+    #         decoded_latent = (
+    #             decoded_latent / vae.config.scaling_factor
+    #         ) + vae.config.shift_factor
+
+    #         # Step 3: Decode using VAE / AE - this output is [-1, 1]
+    #         decoded_output = torch.clamp(vae.decode(decoded_latent).sample, -1.0, 1.0)
+
+    # print("Ending compile warmup ...")
     noise = torch.randn(z.shape, generator=None, dtype=dtype, layout=None).to(device)
     lpips_scores = []
-    early_stopping_criterion = 0
+    # early_stopping_criterion = 0
 
-    start = time.time()
+    # start = time.time()
     for idx, epoch in tqdm.tqdm(enumerate(range(epochs))):
         torch.compiler.cudagraph_mark_step_begin()
 
@@ -393,37 +403,43 @@ def turbulence_task(config_name: str) -> None:
         # Step 3: Decode using VAE / AE - this output is [-1, 1]
         decoded_output = torch.clamp(vae.decode(decoded_latent).sample, -1.0, 1.0)
 
-        kernel_output = torch.nn.functional.softmax(trainable_kernel, dim=1)
-        kernel_output = kernel_output.view(1, 1, kernel_size, kernel_size)  # type: ignore  # noqa
-
         # Now apply the degradation
-        operator_decoded_output = operator.forward(  # type: ignore
-            decoded_output, kernel_output, trainable_tilt
-        )  # type: ignore
+        operator_decoded_output = operator.forward(decoded_output)  # type: ignore
 
         # Apply the loss function - this expects [-1, 1]
         mse_loss = criterion(operator_decoded_output, y_n)
         lpips_loss = lpips_loss_fn(operator_decoded_output, y_n)
         tv_loss = total_variation_loss(decoded_output)
 
-        loss = mse_loss + lpips_loss + 0.1 * tv_loss
+        # What if we also wanted to measure mse in the latent space?
+        # We would want to prepare the latents based on the last time
+        # step
+        # Why are we using the last timestep to encode? This is because
+        # We will add minimum noise to encode the measurment
+        # latent_y_n = vae.encode(y_n).latents
+
+        # # Encode the degraded output
+        # latent_operator_decoded_output = vae.encode(operator_decoded_output).latents  # noqa
+        # latent_mse = criterion(latent_operator_decoded_output, latent_y_n)
+
+        loss = mse_loss + lpips_weight * lpips_loss + 0.1 * tv_loss
 
         # Update gradients of z
         scaler.scale(loss).backward()
 
         # Unscale gradients before clipping
-        scaler.unscale_(optimizer)  # type: ignore
+        scaler.unscale_(optimizer)
 
         # Clip gradients (example: max norm = 1.0)
-        torch.nn.utils.clip_grad_norm_([z], max_norm=0.05)
+        torch.nn.utils.clip_grad_norm_([z], max_norm=gradient_clipping_norm)
 
-        scaler.step(optimizer)  # type: ignore
+        scaler.step(optimizer)
         scaler.update()
 
+        # scheduler.step()
+
         # What is the gradient norm?
-        grad_norm = z.grad.norm()  # type: ignore
-        kernel_grad_norm = trainable_kernel.grad.norm()  # type: ignore
-        tilt_grad_norm = trainable_tilt.grad.norm()
+        # grad_norm = z.grad.norm()
 
         # Compute the PSNR & print loss
         with torch.no_grad():
@@ -445,91 +461,15 @@ def turbulence_task(config_name: str) -> None:
             model_img = model_img.transpose(1, 2, 0)  # type: ignore
 
             psnr_score = peak_signal_noise_ratio(img, model_img)
-            mse_score = ((img - model_img) ** 2).mean()
+            # mse_score = ((img - model_img) ** 2).mean()
 
             lpips_scores.append(lpips_score.item())
 
-            metrics_to_log = {
-                "epoch": epoch,
-                # "current_lr": scheduler.get_last_lr()[0],
-                "mse_loss": mse_score,
-                "psnr": psnr_score,
-                "ssim": ssim_score,
-                "lpips": lpips_score.item(),
-                "grad_norm": grad_norm,
-                "kernel_grad_norm": kernel_grad_norm,
-                "tilt_grad_norm": tilt_grad_norm,
-                "lpips_loss": lpips_loss.item(),
-            }
-            wandb.log(metrics_to_log)  # type: ignore
+            # Log all metrics as trial attributes
+            trial.set_user_attr("psnr", psnr_score)
+            trial.set_user_attr("ssim", ssim_score)
+            trial.set_user_attr("lpips", lpips_score.item())
 
-            current_lpips = lpips_scores[-1]
+            print(psnr_score, ssim_score, lpips_score.item())
 
-            if len(lpips_scores) > 1:
-                best_lpips = np.min(lpips_scores[:-1])
-            else:
-                best_lpips = current_lpips
-
-            # fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(10, 10))
-
-            # ax1.imshow(img)
-            # ax1.set_title("Original Image")
-            # ax1.axis("off")
-
-            # # Let's also now plot the original degredation
-            # y = img_outputs["y"]
-            # y = (y + 1.0) / 2.0  # type: ignore
-            # y = y.squeeze(0).detach().cpu().numpy()  # type: ignore
-            # y = y.transpose(1, 2, 0)
-
-            # ax2.imshow(y)
-            # ax2.set_title("Degredated Image")
-            # ax2.axis("off")
-
-            # ax3.imshow(model_img)
-            # ax3.set_title("Reconstructed Image")
-            # ax3.axis("off")
-
-            # image_save_path = os.path.join(
-            #     save_file_path, f"reference_vs_generated_image_epoch_{idx + 1}.png"
-            # )
-            # fig.savefig(image_save_path, bbox_inches="tight")
-            # plt.close(fig)
-
-            if current_lpips <= best_lpips:
-                # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 10))
-
-                # ax1.imshow(img)
-                # ax1.set_title("Original Image")
-
-                # ax2.imshow(model_img)
-                # ax2.set_title("Reconstructed Image")
-
-                # image_save_path = os.path.join(
-                #     save_file_path, f"reference_vs_generated_image_epoch_{idx + 1}.png"  # noqa
-                # )
-                # fig.savefig(image_save_path, bbox_inches="tight")
-
-                # Reset early stopping criterion
-                early_stopping_criterion = 0
-
-            else:
-                early_stopping_criterion += 1
-
-            # if early_stopping_criterion >= 500:
-            #     break
-
-    end = time.time()
-    print(end - start)
-
-    # The prompt is playing a major role in how good of a solution we can obtain
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 10))
-
-    ax1.imshow(img)
-    ax1.set_title("Original Image")
-
-    ax2.imshow(model_img)
-    ax2.set_title("Reconstructed Image")
-
-    image_save_path = os.path.join(save_file_path, "final_output.png")
-    fig.savefig(image_save_path, bbox_inches="tight")
+    return lpips_score.item()

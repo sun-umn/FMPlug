@@ -5,7 +5,7 @@ from typing import Callable
 import torch
 
 
-@torch.compile
+# @torch.compile
 def integrate_euler(
     f: Callable,
     x0: torch.Tensor,
@@ -59,19 +59,16 @@ def integrate_euler(
             device=device,
         )
 
-        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-        noise_pred = noise_pred_uncond + guidance_scale * (
-            noise_pred_text - noise_pred_uncond
-        )
+        # noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+        # noise_pred = noise_pred_uncond + guidance_scale * (
+        #     noise_pred_text - noise_pred_uncond
+        # )
 
-        # if do_classifier_free_guidance:
-        #     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-        #     noise_pred = noise_pred_uncond + guidance_scale * (
-        #         noise_pred_text - noise_pred_uncond
-        #     )
-
-        # else:
-        #     noise_pred, noise_pred_text = noise_pred.chunk(2)
+        if do_classifier_free_guidance:
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (
+                noise_pred_text - noise_pred_uncond
+            )
 
         # Update step for euler
         prev_sample = sample + dt * noise_pred
