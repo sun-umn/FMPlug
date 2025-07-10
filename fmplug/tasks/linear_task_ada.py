@@ -237,6 +237,7 @@ def integrate(
     # print("NFE: ", NFE)
     # temp_t = 1000 * torch.sigmoid(t)
     temp_t = 1000 * torch.sigmoid(12.0 * t - 6.0)
+
     # print("temp_t: ", temp_t)
     delta_t = temp_t / NFE
     temp_t_next = temp_t - delta_t 
@@ -594,6 +595,7 @@ def solve(config_name: str) -> None:
         z = z.requires_grad_(True)
         # t_ada = torch.tensor(12.0 * (1.0 - alpha) - 6.0).to(device)
         t_ada = torch.tensor(1.0 - alpha).to(device)
+        # t_ada = torch.tensor(-10.0).to(device)
         t_ada = t_ada.requires_grad_(True)
 
         # amplitude = torch.tensor(torch.pi).to(dtype=data_type, device=device)
@@ -676,7 +678,8 @@ def solve(config_name: str) -> None:
                 else:
                     operator_decoded_output = operator.forward(decoded_output)
 
-                loss = criterion(operator_decoded_output, y_n)
+#                 loss = criterion(operator_decoded_output, y_n)
+                loss = criterion(decoded_output, ref_img)
                 encoded = vae.encode(decoded_output).latent_dist.sample()
                 loss += vae_weight * criterion(x_t, encoded)
                 loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)

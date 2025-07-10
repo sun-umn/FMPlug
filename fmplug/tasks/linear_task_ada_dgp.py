@@ -39,7 +39,7 @@ scaler = torch.cuda.amp.GradScaler()
 
 # Global variables for wandb
 API_KEY = "bb47140c09574b488dcf0bc3d92f09d93b6241ce"
-PROJECT_NAME = "FMPlug-Ada-ES"
+PROJECT_NAME = "FMPlug-Ada-DGP-ES"
 
 # Enable wandb
 print("Initialize Project ...")
@@ -267,6 +267,7 @@ def solve(config_name: str) -> None:
     NFE = fmplug_config["NFE"]
     guidance_scale = fmplug_config["guidance_scale"]
     lr = fmplug_config["lr"]
+    lr_dec = fmplug_config["lr_dec"]
     lr_t_ada = fmplug_config["lr_t_ada"]
     decay_factor =  fmplug_config["decay_factor"]
     epochs = fmplug_config["epochs"]
@@ -278,6 +279,10 @@ def solve(config_name: str) -> None:
     t_end = fmplug_config["t_end"]
     data_type = eval(fmplug_config["data_type"])
     optimizer_select = fmplug_config["optimizer_select"]
+    finetune_decoder_blocks_interval = fmplug_config.get("finetune_decoder_blocks_interval", 0) # Default to 0 (no incremental finetuning)
+    lr_z_phases = fmplug_config.get("lr_z_phases", [lr]) # Learning rates for z in different phases
+    lr_dec_phases = fmplug_config.get("lr_dec_phases", [lr_dec]) # Learning rates for decoder in different phases
+    lr_phase_milestones = fmplug_config.get("lr_phase_milestones", []) # Iteration milestones for LR changes
     
     es_window_size = fmplug_config["es_window_size"]
     es_patience = fmplug_config["es_patience"]
@@ -299,6 +304,7 @@ def solve(config_name: str) -> None:
                 "method": method,
                 "optimizer": optimizer_select,
                 "lr": lr,
+                "lr_dec": lr_dec,
                 "lr_t_ada": lr_t_ada,
                 "decay_factor": decay_factor,
                 "epochs": epochs,
@@ -312,7 +318,10 @@ def solve(config_name: str) -> None:
                 "lpips_weight": lpips_weight,
                 "TV_reg_weight": TV_reg_weight,
                 "t_end": t_end,
-                "data_type": data_type
+                "data_type": data_type,
+                "lr_z_phases": lr_z_phases,
+                "lr_dec_phases": lr_dec_phases,
+                "lr_phase_milestones": lr_phase_milestones
             },
         )
     
@@ -402,7 +411,8 @@ def solve(config_name: str) -> None:
         # VAE
         vae = pipe.vae
         vae.eval()
-        vae.requires_grad_(False)
+        vae.encoder.requires_grad_(False)
+        vae.decoder.requires_grad_(False) # Freeze decoder initially
         vae.enable_gradient_checkpointing()
 
         prompt_2 = None
@@ -553,9 +563,19 @@ def solve(config_name: str) -> None:
         L2_tv = tv_lp_loss(pow = 2)
         
         if optimizer_select == "adam":
-            params_group1 = {'params': z, 'lr': lr}
+            params_group1 = {'params': z, 'lr': lr[0]}
             params_group2 = {'params': t_ada, 'lr': lr_t_ada}
+            
+            # Get decoder blocks for incremental fine-tuning
+            decoder_blocks = list(vae.decoder.up_blocks) # Assuming decoder blocks are in vae.decoder.up_blocks
+            num_decoder_blocks = len(decoder_blocks)
+            
+            # Initialize optimizer with z and t_ada, no decoder params initially
             optimizer = torch.optim.AdamW([params_group1, params_group2])
+            
+            # Keep track of which decoder blocks are currently being fine-tuned
+            current_finetuned_blocks = 0
+
         elif optimizer_select == "lbfgs":
             optimizer_z = torch.optim.LBFGS([z], lr=lr, max_iter=50, history_size=50, line_search_fn="strong_wolfe")
             optimizer_t = torch.optim.LBFGS([t_ada], lr=lr_t_ada, max_iter=50, history_size=50, line_search_fn="strong_wolfe")
@@ -664,8 +684,31 @@ def solve(config_name: str) -> None:
 
         
         for iterator in tqdm.tqdm(range(epochs)):
-            # print("Iter: ", iterator)
+            # Incremental fine-tuning of VAE decoder blocks
+            if finetune_decoder_blocks_interval > 0 and iterator > 0 and iterator % finetune_decoder_blocks_interval == 0:
+                block_to_unfreeze_idx = iterator // finetune_decoder_blocks_interval - 1
+                if block_to_unfreeze_idx < num_decoder_blocks:
+                    for param in decoder_blocks[block_to_unfreeze_idx].parameters():
+                        param.requires_grad_(True)
+                    print(f"Unfreezing decoder block {block_to_unfreeze_idx} to optimizer with learning rate {lr_dec[block_to_unfreeze_idx]}")
+                    optimizer.param_groups[0]['lr'] = lr[block_to_unfreeze_idx]
+                    optimizer.add_param_group({'params': decoder_blocks[block_to_unfreeze_idx].parameters(), 'lr': lr_dec[block_to_unfreeze_idx]})
+                    current_finetuned_blocks += 1
+
             if optimizer_select == "adam":
+                # Adjust learning rates based on phases
+                for i, milestone in enumerate(lr_phase_milestones):
+                    if iterator == milestone:
+                        if i < len(lr_z_phases):
+                            optimizer.param_groups[0]['lr'] = lr_z_phases[i] # Update lr for z
+                            print(f"Updated lr for z to {lr_z_phases[i]} at iteration {iterator}")
+                        if i < len(lr_dec_phases):
+                            # Update lr for decoder blocks that are already in the optimizer
+                            for param_group in optimizer.param_groups:
+                                if 'params' in param_group and any(p.requires_grad for p in param_group['params'] if p in vae.decoder.parameters()):
+                                    param_group['lr'] = lr_dec_phases[i]
+                            print(f"Updated lr for decoder to {lr_dec_phases[i]} at iteration {iterator}")
+
                 loss = optimizer.step(closure)
                 new_lr = lr_t_ada * (decay_factor ** iterator)
                 optimizer.param_groups[1]['lr'] = new_lr

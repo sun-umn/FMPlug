@@ -27,6 +27,10 @@ from fmplug.utils.measurements import get_noise, get_operator
 from fmplug.utils.tv_norm import tv_lp_loss
 from fmplug.utils.image_utils import Blurkernel, generate_tilt_map, mask_generator
 from fmplug.utils.var_es import VarianceEarlyStopping
+from fmplug.dip_module.UNet import UNet
+from fmplug.dip_module.Siren import Siren, get_mgrid
+from fmplug.dip_module.skip import skip
+
 import pandas as pd
 import cv2
 
@@ -284,6 +288,26 @@ def solve(config_name: str) -> None:
     es_min_epochs  = fmplug_config["es_min_epochs"]
     es_delta  = fmplug_config["es_delta"]
     
+    dip_in_channel = fmplug_config["dip_in_channel"]
+    dip_out_channel = fmplug_config["dip_out_channel"]
+    dip_num_channels_down = fmplug_config["dip_num_channels_down"]
+    dip_num_channels_up = fmplug_config["dip_num_channels_up"]
+    dip_num_channels_skip = fmplug_config["dip_num_channels_skip"]
+    dip_filter_size_down = fmplug_config["dip_filter_size_down"]
+    dip_filter_size_up = fmplug_config["dip_filter_size_up"]
+    dip_filter_skip_size = fmplug_config["dip_filter_skip_size"]
+    dip_upsample_mode = fmplug_config["dip_upsample_mode"]
+    dip_need_sigmoid = fmplug_config["dip_need_sigmoid"]
+    dip_need_bias = fmplug_config["dip_need_bias"]
+    dip_pad = fmplug_config["dip_pad"]
+    dip_act_fun = fmplug_config["dip_act_fun"]
+    dip_lr = fmplug_config["dip_lr"]
+    
+    siren_in_features = fmplug_config["siren_in_features"]
+    siren_hidden_features = fmplug_config["siren_hidden_features"]
+    siren_out_features = fmplug_config["siren_out_features"]
+    siren_hidden_layers = fmplug_config["siren_hidden_layers"]
+    siren_outermost_linear = fmplug_config["siren_outermost_linear"]
     
     measure_config = config_all['measurement']
     task = measure_config["operator"]["name"]
@@ -503,6 +527,29 @@ def solve(config_name: str) -> None:
         # t_ada = torch.tensor(12.0 * (1.0 - alpha) - 6.0).to(device)
         t_ada = torch.tensor(1.0 - alpha).to(device)
         t_ada = t_ada.requires_grad_(True)
+        
+        # img_z = torch.randn(1, dip_in_channel, image_size, image_size, device=device, dtype=data_type).to(device).requires_grad_(False)
+        # img_rep = skip(  
+        #                 num_input_channels=dip_in_channel,
+        #                 num_output_channels=dip_out_channel,
+        #                 num_channels_down=dip_num_channels_down,
+        #                 num_channels_up=dip_num_channels_up,
+        #                 num_channels_skip=dip_num_channels_skip,
+        #                 filter_size_down=dip_filter_size_down,
+        #                 filter_size_up=dip_filter_size_up,
+        #                 filter_skip_size=dip_filter_skip_size,
+        #                 upsample_mode=dip_upsample_mode,
+        #                 need_sigmoid=dip_need_sigmoid, 
+        #                 need_bias=dip_need_bias, 
+        #                 pad=dip_pad, 
+        #                 act_fun=dip_act_fun).to(device)
+        img_z = get_mgrid([1, 3, image_size, image_size]).to(device)
+        img_rep = Siren(
+                        in_features=siren_in_features, 
+                        hidden_features=siren_hidden_features, 
+                        out_features=siren_out_features, 
+                        hidden_layers=siren_hidden_layers, 
+                        outermost_linear=siren_outermost_linear).to(device)
 
         # amplitude = torch.tensor(torch.pi).to(dtype=data_type, device=device)
         
@@ -522,7 +569,7 @@ def solve(config_name: str) -> None:
 
             return result
 
-        def checkpointed_integrate(z):
+        def checkpointed_integrate(z, t_ada):
             return integrate(
                 f,
                 z,
@@ -555,7 +602,9 @@ def solve(config_name: str) -> None:
         if optimizer_select == "adam":
             params_group1 = {'params': z, 'lr': lr}
             params_group2 = {'params': t_ada, 'lr': lr_t_ada}
-            optimizer = torch.optim.AdamW([params_group1, params_group2])
+            params_group3 = {'params': img_rep.parameters(), 'lr': dip_lr}
+            optimizer = torch.optim.AdamW([params_group1, params_group2, params_group3])
+            dip_optimizer = torch.optim.AdamW(img_rep.parameters(), lr=dip_lr)
         elif optimizer_select == "lbfgs":
             optimizer_z = torch.optim.LBFGS([z], lr=lr, max_iter=50, history_size=50, line_search_fn="strong_wolfe")
             optimizer_t = torch.optim.LBFGS([t_ada], lr=lr_t_ada, max_iter=50, history_size=50, line_search_fn="strong_wolfe")
@@ -575,16 +624,52 @@ def solve(config_name: str) -> None:
             optimizer.zero_grad()
             # torch.cuda.reset_peak_memory_stats()
             with torch.amp.autocast("cuda", dtype=data_type):
-                x_t = checkpoint(checkpointed_integrate, z)
+                x_t = checkpoint(checkpointed_integrate, z, t_ada)
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
                 decoded_output = torch.sin(vae.decode(x_t).sample)
+                img_residual = img_rep(img_z).reshape(decoded_output.shape)
 
                 if measure_config['operator']['name'] == 'inpainting':
                     operator_decoded_output = operator.forward(decoded_output, mask=mask)
+                    operator_residual_output = operator.forward(decoded_output.detach() + img_residual, mask=mask)
                 else:
                     operator_decoded_output = operator.forward(decoded_output)
+                    operator_residual_output = operator.forward(decoded_output.detach() + img_residual)
 
-                loss = criterion(operator_decoded_output, y_n)
+                loss = criterion(operator_decoded_output, y_n) + criterion(operator_residual_output, y_n)
+                encoded = vae.encode(decoded_output).latent_dist.sample()
+                loss += vae_weight * criterion(x_t, encoded)
+                loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
+                loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
+                loss *= loss_multiplier
+            
+            loss = loss.float()
+            scaler.scale(loss).backward()
+            # Report peak memory used in MB
+            # peak_memory = torch.cuda.max_memory_allocated() / 1024**2
+            # print(f"Peak GPU memory used: {peak_memory:.2f} MB")
+            # print("gradient z: ", z.grad.min(), z.grad.max())
+
+            return loss
+        
+        def dip_closure():
+            nonlocal decoded_output
+            optimizer.zero_grad()
+            # torch.cuda.reset_peak_memory_stats()
+            with torch.amp.autocast("cuda", dtype=data_type):
+                x_t = checkpoint(checkpointed_integrate, z.detach(), t_ada.detach())
+                x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
+                decoded_output = torch.sin(vae.decode(x_t).sample)
+                img_residual = img_rep(img_z).reshape(decoded_output.shape)
+
+                if measure_config['operator']['name'] == 'inpainting':
+                    operator_decoded_output = operator.forward(decoded_output, mask=mask).detach()
+                    operator_residual_output = operator.forward(decoded_output.detach() + img_residual, mask=mask)
+                else:
+                    operator_decoded_output = operator.forward(decoded_output).detach()
+                    operator_residual_output = operator.forward(decoded_output.detach() + img_residual)
+
+                loss = criterion(operator_decoded_output, y_n) + criterion(operator_residual_output, y_n)
                 encoded = vae.encode(decoded_output).latent_dist.sample()
                 loss += vae_weight * criterion(x_t, encoded)
                 loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
@@ -606,7 +691,7 @@ def solve(config_name: str) -> None:
             optimizer_z.zero_grad()
             # torch.cuda.reset_peak_memory_stats()
             with torch.amp.autocast("cuda", dtype=data_type):
-                x_t = checkpoint(checkpointed_integrate, z)
+                x_t = checkpoint(checkpointed_integrate, z, t_ada)
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
                 decoded_output = torch.sin(vae.decode(x_t).sample)
 
@@ -637,7 +722,7 @@ def solve(config_name: str) -> None:
             optimizer_t.zero_grad()
             # torch.cuda.reset_peak_memory_stats()
             with torch.amp.autocast("cuda", dtype=data_type):
-                x_t = checkpoint(checkpointed_integrate, z)
+                x_t = checkpoint(checkpointed_integrate, z, t_ada)
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
                 decoded_output = torch.sin(vae.decode(x_t).sample)
 
@@ -666,6 +751,8 @@ def solve(config_name: str) -> None:
         for iterator in tqdm.tqdm(range(epochs)):
             # print("Iter: ", iterator)
             if optimizer_select == "adam":
+                for _ in range(10):
+                    loss = dip_optimizer.step(dip_closure)
                 loss = optimizer.step(closure)
                 new_lr = lr_t_ada * (decay_factor ** iterator)
                 optimizer.param_groups[1]['lr'] = new_lr

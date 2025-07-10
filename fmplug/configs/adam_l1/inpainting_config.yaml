@@ -16,20 +16,20 @@ fmplug:
   scale_factor: 4
 
   method: "heun2"
-  alpha: 0.2
+  alpha: 0.0
   t_end: 0.05
   NFE: 3
   batch_size: 1
-  guidance_scale: 1.0
-  lr: 0.1
-  lr_t_ada: 0.05
-  decay_factor: 0.98
-  epochs: 1000
+  guidance_scale: 0.0
+  lr: 1.0
+  lr_t_ada: 0.0
+  decay_factor: 0.95
+  epochs: 100
   loss_multiplier: 1.0
   vae_weight: 0.0
   lpips_weight: 0.0
   TV_reg_weight: 0.0
   loss_fn: "l1"
   data_type: torch.bfloat16
-  optimizer_select: "adam"
+  optimizer_select: "lbfgs"
 

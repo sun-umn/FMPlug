@@ -11,29 +11,25 @@ measurement:
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg/"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-ES"
+  save_folder: "/scratch.global/wan01530/FMPlug/regression"
   img_size: 512
   scale_factor: 4
 
   method: "heun2"
-  alpha: 0.2
+  alpha: 0.5
   t_end: 0.05
   NFE: 3
   batch_size: 1
-  guidance_scale: 1.0
-  lr: 0.1
-  lr_t_ada: 0.05
-  decay_factor: 0.98
-  epochs: 1000
+  guidance_scale: 0.0
+  lr: 1.0
+  lr_t_ada: 0.5
+  decay_factor: 0.95
+  epochs: 500
   loss_multiplier: 1.0
   vae_weight: 0.0
   lpips_weight: 0.0
   TV_reg_weight: 0.0
   loss_fn: "l1"
   data_type: torch.bfloat16
-  optimizer_select: "adam"
-  
-  es_window_size: 75
-  es_patience: 25
-  es_min_epochs: 200
-  es_delta: 0.000001
+  optimizer_select: "lbfgs"
+

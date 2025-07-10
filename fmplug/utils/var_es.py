@@ -49,7 +49,7 @@ class VarianceEarlyStopping:
         # Check mean trend of variance
         if self.epoch_count >= self.min_epochs:
             current_mean_var = np.mean(self.variance_history)
-            # print(f"Epoch {self.epoch_count}: Current Mean Variance = {current_mean_var:.6f}")
+            print(f"Epoch {self.epoch_count}: Current Mean Variance = {current_mean_var:.8f}")
             if self.best_mean_variance - current_mean_var > self.delta:
                 # Significant decrease
                 self.best_mean_variance = current_mean_var

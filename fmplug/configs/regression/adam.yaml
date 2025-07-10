@@ -3,30 +3,28 @@ measurement:
     name: gaussian
     sigma: 0.03
   operator:
-    name: motion_blur
-    kernel_size: 65
-    intensity: 0.5
-  kernel_opt: 
-    kernel: motion
-    kernel_size: 65
-    intensity: 0.5
+    name: inpainting
+  mask_opt:
+    mask_type: random
+    mask_prob_range: [0.7, 0.7]  # for random
+    image_size: 512
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg/"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-ES"
+  save_folder: "/scratch.global/wan01530/FMPlug/regression"
   img_size: 512
   scale_factor: 4
 
   method: "heun2"
-  alpha: 0.2
+  alpha: 0.5
   t_end: 0.05
   NFE: 3
   batch_size: 1
-  guidance_scale: 2.0
+  guidance_scale: 0.0
   lr: 0.1
-  lr_t_ada: 0.05
-  decay_factor: 0.98
-  epochs: 1000
+  lr_t_ada: 0.5
+  decay_factor: 0.95
+  epochs: 10000
   loss_multiplier: 1.0
   vae_weight: 0.0
   lpips_weight: 0.0
@@ -35,7 +33,3 @@ fmplug:
   data_type: torch.bfloat16
   optimizer_select: "adam"
 
-  es_window_size: 75
-  es_patience: 25
-  es_min_epochs: 200
-  es_delta: 0.000001
