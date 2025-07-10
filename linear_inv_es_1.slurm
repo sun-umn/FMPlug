@@ -16,7 +16,7 @@ conda activate py311
 # python -m cli run-super-resolution-task --config_name="super_resolution/config_ada_2"
 # python -m cli run-super-resolution-task --config_name="super_resolution/config_ada_3"
 # python -m cli run-super-resolution-task --config_name="super_resolution/config_ada_4"
-python -m cli_ada_es_1 run-FMPlug-task --config_name="adam_l1_es_ft/inpainting_config"
+python -m cli_ada_es_1 run-FMPlug-task --config_name="adam_l1_es_1/inpainting_config"
 python -m cli_ada_es_1 run-FMPlug-task --config_name="adam_l1_es_ft/superresolution_config"
 python -m cli_ada_es_1 run-FMPlug-task --config_name="adam_l1_es_ft/gaussian_blur_config"
 python -m cli_ada_es_1 run-FMPlug-task --config_name="adam_l1_es_ft/motion_blur_config"

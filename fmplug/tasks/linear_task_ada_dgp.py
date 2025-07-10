@@ -685,7 +685,7 @@ def solve(config_name: str) -> None:
         
         for iterator in tqdm.tqdm(range(epochs)):
             # Incremental fine-tuning of VAE decoder blocks
-            if finetune_decoder_blocks_interval > 0 and iterator > 0 and iterator % finetune_decoder_blocks_interval == 0:
+            if finetune_decoder_blocks_interval > 0 and iterator > 0 and iterator % finetune_decoder_blocks_interval == 0 and iterator < finetune_decoder_blocks_interval * num_decoder_blocks:
                 block_to_unfreeze_idx = iterator // finetune_decoder_blocks_interval - 1
                 if block_to_unfreeze_idx < num_decoder_blocks:
                     for param in decoder_blocks[block_to_unfreeze_idx].parameters():

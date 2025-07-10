@@ -12,33 +12,33 @@ measurement:
     intensity: 0.5
 
 fmplug:
-  data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg/"
+  data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024/"
   save_folder: "/scratch.global/wan01530/FMPlug/experiment-FT-noprompt"
   img_size: 512
   scale_factor: 4
 
   method: "heun2"
-  alpha: 0.5
+  alpha: 0.2
   t_end: 0.0
   NFE: 3
   batch_size: 1
   guidance_scale: 0.0
-  lr: 0.01
-  lr_dec: 0.00001
+  lr: [0.002, 0.001, 0.00005]
+  lr_dec: [0.00005, 0.00002, 0.00001]
   lr_t_ada: 0.1
-  decay_factor: 0.98
-  epochs: 1000
+  decay_factor: 0.95
+  epochs: 2000
   loss_multiplier: 1.0
   vae_weight: 0.0
-  lpips_weight: 0.1
-  TV_reg_weight: 0.00001
-  loss_fn: "mse"
+  lpips_weight: 0.5
+  TV_reg_weight: 0.0
+  loss_fn: "l1"
   data_type: torch.bfloat16
   optimizer_select: "adam"
-
+  
   es_window_size: 100
-  es_patience: 25
-  es_min_epochs: 600
+  es_patience: 50
+  es_min_epochs: 800
   es_delta: 0.00001
 
   finetune_decoder_blocks_interval: 200
