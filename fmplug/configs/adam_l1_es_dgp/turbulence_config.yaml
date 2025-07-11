@@ -12,7 +12,7 @@ measurement:
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024/"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-FT"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-DGP"
   img_size: 512
   scale_factor: 4
 
@@ -22,7 +22,7 @@ fmplug:
   NFE: 3
   batch_size: 1
   guidance_scale: 0.0
-  lr: [0.002, 0.001, 0.00005]
+  lr: [0.002, 0.001, 0.00002, 0.00001]
   lr_dec: [0.00005, 0.00002, 0.00001]
   lr_t_ada: 0.1
   decay_factor: 0.95
@@ -37,7 +37,7 @@ fmplug:
   
   es_window_size: 100
   es_patience: 50
-  es_min_epochs: 800
-  es_delta: 0.00001
+  es_min_epochs: 1000
+  es_delta: 0.0000005
 
   finetune_decoder_blocks_interval: 200

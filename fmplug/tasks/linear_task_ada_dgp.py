@@ -691,7 +691,7 @@ def solve(config_name: str) -> None:
                     for param in decoder_blocks[block_to_unfreeze_idx].parameters():
                         param.requires_grad_(True)
                     print(f"Unfreezing decoder block {block_to_unfreeze_idx} to optimizer with learning rate {lr_dec[block_to_unfreeze_idx]}")
-                    optimizer.param_groups[0]['lr'] = lr[block_to_unfreeze_idx]
+                    optimizer.param_groups[0]['lr'] = lr[block_to_unfreeze_idx+1]
                     optimizer.add_param_group({'params': decoder_blocks[block_to_unfreeze_idx].parameters(), 'lr': lr_dec[block_to_unfreeze_idx]})
                     current_finetuned_blocks += 1
 
