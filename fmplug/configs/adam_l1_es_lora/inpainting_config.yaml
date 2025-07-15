@@ -3,13 +3,11 @@ measurement:
     name: gaussian
     sigma: 0.03
   operator:
-    name: motion_blur
-    kernel_size: 65
-    intensity: 0.5
-  kernel_opt: 
-    kernel: motion
-    kernel_size: 65
-    intensity: 0.5
+    name: inpainting
+  mask_opt:
+    mask_type: random
+    mask_prob_range: [0.7, 0.7]  # for random
+    image_size: 512
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024/"
@@ -23,8 +21,9 @@ fmplug:
   NFE: 3
   batch_size: 1
   guidance_scale: 0.0
-  lr: [0.2, 0.1, 0.05, 0.02]
-  lr_dec: [0.00005, 0.00002, 0.00001]
+  lr: [0.002, 0.001, 0.00002, 0.00001]
+  lr_dec: [0.00005, 0.00002, 0.00001, 0.000005]
+  lr_phase_milestones: [200, 400, 600, 800]
   lr_t_ada: 0.1
   decay_factor: 0.95
   epochs: 2000
@@ -38,7 +37,8 @@ fmplug:
   
   es_window_size: 100
   es_patience: 50
-  es_min_epochs: 600
-  es_delta: 0.00001
+  es_min_epochs: 1000
+  es_delta: 0.0000005
 
-  finetune_decoder_blocks_interval: 200
+  lora_scale: 1.0
+  lora_rank: 16

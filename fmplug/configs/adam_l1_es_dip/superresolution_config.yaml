@@ -14,18 +14,18 @@ fmplug:
   scale_factor: 4
 
   method: "heun2"
-  alpha: 0.2
-  t_end: 0.05
+  alpha: 0.9
+  t_end: 0.0
   NFE: 3
   batch_size: 1
-  guidance_scale: 2.0
-  lr: 0.1
-  lr_t_ada: 0.05
+  guidance_scale: 0.0
+  lr: 0.02
+  lr_t_ada: 0.1
   decay_factor: 0.98
-  epochs: 1000
+  epochs: 2000
   loss_multiplier: 1.0
-  vae_weight: 0.0
-  lpips_weight: 0.0
+  vae_weight: 1.0
+  lpips_weight: 1.0
   TV_reg_weight: 0.0
   loss_fn: "l1"
   data_type: torch.bfloat16
@@ -33,7 +33,7 @@ fmplug:
 
   es_window_size: 100
   es_patience: 25
-  es_min_epochs: 100
+  es_min_epochs: 200
   es_delta: 0.000001
 
   
@@ -50,10 +50,12 @@ fmplug:
   dip_need_bias: True
   dip_pad: "zero"
   dip_act_fun: "LeakyReLU"
-  dip_lr: 0.001
 
   siren_in_features: 2
   siren_hidden_features: 512
   siren_out_features: 3
-  siren_hidden_layers: 3
+  siren_hidden_layers: 2
   siren_outermost_linear: True
+
+  dip_lr: 0.01
+  target_norm: 0.05

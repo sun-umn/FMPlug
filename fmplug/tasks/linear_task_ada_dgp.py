@@ -57,6 +57,25 @@ def set_seed(seed):
     np.random.seed(seed)
     random.seed(seed)
 
+def relative_l1_loss(pred, target, eps=1e-5):
+    """
+    Relative L1 loss that reduces the influence of high absolute values.
+
+    Args:
+        pred: Predicted image tensor, shape (N, C, H, W)
+        target: Ground truth image tensor, shape (N, C, H, W)
+        eps: Small constant to avoid division by zero
+
+    Returns:
+        Scalar loss
+    """
+    diff = torch.abs(pred - target)
+    denom = torch.abs(target) + eps
+    relative_error = diff / denom
+    return relative_error.mean()
+
+def hybrid_loss(pred, target, alpha=0.8):
+    return alpha * torch.nn.functional.mse_loss(pred, target) + (1 - alpha) * relative_l1_loss(pred, target)
 
 def save_png_cv2(array, path):
     # If array is CHW, convert to HWC
@@ -117,7 +136,6 @@ def normalize_latent(z_x: torch.Tensor, t_x: float):
     z_var = torch.tensor(z_var, dtype=z_x.dtype, device=z_x.device)
     z_x = torch.sqrt(z_var / torch.var(z_x, unbiased=False)) * z_x
     return z_x
-
 
 def integrate(
     f,
@@ -262,7 +280,6 @@ def solve(config_name: str) -> None:
     data_folder = fmplug_config["data_folder"]
     save_folder = fmplug_config["save_folder"]
     image_size = fmplug_config["img_size"]
-    scale_factor = fmplug_config["scale_factor"]
     alpha = fmplug_config["alpha"]
     NFE = fmplug_config["NFE"]
     guidance_scale = fmplug_config["guidance_scale"]
@@ -310,7 +327,6 @@ def solve(config_name: str) -> None:
                 "epochs": epochs,
                 "loss_multiplier": loss_multiplier,
                 "image_size": image_size,
-                "scale_factor": scale_factor,
                 "NFE": NFE,
                 "guidance_scale": guidance_scale,
                 "loss_fn": loss_fn,
@@ -501,7 +517,11 @@ def solve(config_name: str) -> None:
         img = img.to(y_n.dtype)
         img = img.to(device)
         with torch.no_grad():
-            z = encode(img)
+            if "super_resolution" in task:
+                blur = transforms.GaussianBlur(kernel_size=7, sigma=1.0)
+                z = encode(blur(img))
+            else:
+                z = encode(img)
             z = np.sqrt(alpha) * z + np.sqrt(1 - alpha) * torch.randn_like(z)
             z = z.detach()
         
@@ -548,9 +568,12 @@ def solve(config_name: str) -> None:
         # Criterion for learning
         if loss_fn == "l1":
             criterion = torch.nn.L1Loss().to(device)
-
         elif loss_fn == "mse":
-            criterion = torch.nn.MSELoss().to(device)  # type: ignore
+            criterion = torch.nn.MSELoss().to(device)
+        elif loss_fn == "l1_rel":
+            criterion = relative_l1_loss
+        elif loss_fn == "hybrid":
+            criterion = hybrid_loss
 
         # Setup perceptual loss
         # percep_loss_fn = PerceptualLoss(layers=["relu1_2"]).to(device)
@@ -573,8 +596,6 @@ def solve(config_name: str) -> None:
             # Initialize optimizer with z and t_ada, no decoder params initially
             optimizer = torch.optim.AdamW([params_group1, params_group2])
             
-            # Keep track of which decoder blocks are currently being fine-tuned
-            current_finetuned_blocks = 0
 
         elif optimizer_select == "lbfgs":
             optimizer_z = torch.optim.LBFGS([z], lr=lr, max_iter=50, history_size=50, line_search_fn="strong_wolfe")
@@ -584,6 +605,11 @@ def solve(config_name: str) -> None:
         psnrs = []
         losses = []
         best_images = []
+        z_grad_norms = []
+        z_deltas = []
+        z_rel_updates = []
+        z_prev = z.clone().detach()
+        rel_update, delta, grad_norm = 0.0, 0.0, 0.0
         
         # Current memory usage by tensors (in MB)
         print("Init Opt Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
@@ -605,18 +631,25 @@ def solve(config_name: str) -> None:
                     operator_decoded_output = operator.forward(decoded_output)
 
                 loss = criterion(operator_decoded_output, y_n)
-                encoded = vae.encode(decoded_output).latent_dist.sample()
-                loss += vae_weight * criterion(x_t, encoded)
+                # encoded = vae.encode(decoded_output).latent_dist.sample()
+                loss += vae_weight * (x_t**2 / 2).mean()
                 loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
+                # loss += lpips_weight * lpips_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0).mean()
                 loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
                 loss *= loss_multiplier
             
             loss = loss.float()
-            scaler.scale(loss).backward()
+            # scaler.scale(loss).backward()
+            loss.backward()
             # Report peak memory used in MB
             # peak_memory = torch.cuda.max_memory_allocated() / 1024**2
             # print(f"Peak GPU memory used: {peak_memory:.2f} MB")
             # print("gradient z: ", z.grad.min(), z.grad.max())
+            
+            # During training loop:
+            
+
+            # Backward + optimizer.step()
 
             return loss
 
@@ -685,15 +718,25 @@ def solve(config_name: str) -> None:
         
         for iterator in tqdm.tqdm(range(epochs)):
             # Incremental fine-tuning of VAE decoder blocks
+            # if finetune_decoder_blocks_interval > 0 and iterator % finetune_decoder_blocks_interval == 0 and iterator < finetune_decoder_blocks_interval * num_decoder_blocks:
             if finetune_decoder_blocks_interval > 0 and iterator > 0 and iterator % finetune_decoder_blocks_interval == 0 and iterator < finetune_decoder_blocks_interval * num_decoder_blocks:
                 block_to_unfreeze_idx = iterator // finetune_decoder_blocks_interval - 1
                 if block_to_unfreeze_idx < num_decoder_blocks:
                     for param in decoder_blocks[block_to_unfreeze_idx].parameters():
                         param.requires_grad_(True)
                     print(f"Unfreezing decoder block {block_to_unfreeze_idx} to optimizer with learning rate {lr_dec[block_to_unfreeze_idx]}")
+                    # optimizer.param_groups[0]['lr'] = lr[block_to_unfreeze_idx]
                     optimizer.param_groups[0]['lr'] = lr[block_to_unfreeze_idx+1]
                     optimizer.add_param_group({'params': decoder_blocks[block_to_unfreeze_idx].parameters(), 'lr': lr_dec[block_to_unfreeze_idx]})
-                    current_finetuned_blocks += 1
+                    for param_group_idx in range(1, block_to_unfreeze_idx + 1):
+                        # Update the learning rate for previously added decoder blocks
+                        optimizer.param_groups[-param_group_idx]['lr'] = lr_dec[block_to_unfreeze_idx]
+                # if block_to_unfreeze_idx == 0:
+                #     for param in decoder_blocks[-1].parameters():
+                #         param.requires_grad_(True)
+                #     optimizer.add_param_group({'params': decoder_blocks[-1].parameters(), 'lr': lr_dec[block_to_unfreeze_idx]})
+                # else:
+                #     optimizer.param_groups[-1]['lr'] = lr_dec[block_to_unfreeze_idx]
 
             if optimizer_select == "adam":
                 # Adjust learning rates based on phases
@@ -715,6 +758,15 @@ def solve(config_name: str) -> None:
             elif optimizer_select == "lbfgs":
                 _ = optimizer_z.step(closure_z)
                 loss = optimizer_t.step(closure_t)
+                
+            grad_norm = z.grad.norm().item()
+            delta = (z - z_prev).norm().item()
+            rel_update = delta / (z_prev.norm() + 1e-8)
+
+            z_grad_norms.append(grad_norm)
+            z_deltas.append(delta)
+            z_rel_updates.append(rel_update.item())
+            z_prev = z.clone().detach()
             # scheduler.step()
 
             losses.append(loss.item())
@@ -743,11 +795,14 @@ def solve(config_name: str) -> None:
 
                 metrics_to_log = {
                     "epoch": iterator,
-                    "t_ada": (1000 * torch.sigmoid(t_ada)).item(),
+                    "t_ada": (1000 * torch.sigmoid(12.0 * t_ada - 6.0)).item(),
                     "loss": loss.item()/loss_multiplier,
                     "psnr": tmp_psnr,
                     "lpips": lpips_score.item(),
                     "mse_loss": mse_score,
+                    "z_grad_norms": grad_norm,
+                    "z_deltas": delta,
+                    "z_rel_updates": rel_update.item()
                 }
                 wandb.log(metrics_to_log)  # type: ignore
 
@@ -767,7 +822,7 @@ def solve(config_name: str) -> None:
                     df_new.to_csv(log_path, mode='w', header=True, index=False)
                 
                 if early_stop_indicator.get_flag() == False:
-                    early_stop_indicator.update(loss.item(), output_numpy)
+                    early_stop_indicator.update(loss.item() / loss_multiplier, output_numpy)
                 else:
                     # min_index = min(range(len(early_stop_indicator.get_losses())), key=lambda i: losses[i])
                     min_index = es_window_size - es_patience - 1

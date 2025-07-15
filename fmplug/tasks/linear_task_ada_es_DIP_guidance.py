@@ -43,7 +43,7 @@ scaler = torch.cuda.amp.GradScaler()
 
 # Global variables for wandb
 API_KEY = "bb47140c09574b488dcf0bc3d92f09d93b6241ce"
-PROJECT_NAME = "FMPlug-Ada-ES"
+PROJECT_NAME = "FMPlug-Ada-ES-DIP-Guidance"
 
 # Enable wandb
 print("Initialize Project ...")
@@ -266,8 +266,9 @@ def solve(config_name: str) -> None:
     data_folder = fmplug_config["data_folder"]
     save_folder = fmplug_config["save_folder"]
     image_size = fmplug_config["img_size"]
-    scale_factor = fmplug_config["scale_factor"]
-    alpha = fmplug_config["alpha"]
+    # alpha = fmplug_config["alpha"]
+    beta = fmplug_config["beta"]
+    beta_decay = fmplug_config["beta_decay"]
     NFE = fmplug_config["NFE"]
     guidance_scale = fmplug_config["guidance_scale"]
     lr = fmplug_config["lr"]
@@ -328,7 +329,10 @@ def solve(config_name: str) -> None:
                 "epochs": epochs,
                 "loss_multiplier": loss_multiplier,
                 "image_size": image_size,
-                "scale_factor": scale_factor,
+                "scale_factor": measure_config['operator']['scale_factor'],
+                # "alpha": alpha,
+                "beta": beta,
+                "beta_decay": beta_decay,
                 "NFE": NFE,
                 "guidance_scale": guidance_scale,
                 "loss_fn": loss_fn,
@@ -507,25 +511,12 @@ def solve(config_name: str) -> None:
         y_n_numpy = (y_n_numpy + 1.0) / 2.0
         y_n.requires_grad = False
 
-        if "super_resolution" in task:
-            img = y_n.reshape([1, -1, image_size//int(measure_config['operator']['scale_factor']), image_size//int(measure_config['operator']['scale_factor'])])
-            img = transforms.functional.resize(img, [image_size, image_size])
-        else:
-            img = y_n.reshape([1, -1, image_size, image_size])
-        img = img.to(y_n.dtype)
-        img = img.to(device)
-        with torch.no_grad():
-            z = encode(img)
-            z = np.sqrt(alpha) * z + np.sqrt(1 - alpha) * torch.randn_like(z)
-            z = z.detach()
-        
-        del img
-
             
-        z = torch.nn.parameter.Parameter(z, True).to(device)
-        z = z.requires_grad_(True)
+        # z = torch.nn.parameter.Parameter(z, True).to(device)
+        # z = z.requires_grad_(True)
         # t_ada = torch.tensor(12.0 * (1.0 - alpha) - 6.0).to(device)
-        t_ada = torch.tensor(1.0 - alpha).to(device)
+        # t_ada = torch.tensor(1.0 - alpha).to(device)
+        t_ada = torch.tensor(0.0).to(device)
         t_ada = t_ada.requires_grad_(True)
         
         # img_z = torch.randn(1, dip_in_channel, image_size, image_size, device=device, dtype=data_type).to(device).requires_grad_(False)
@@ -600,15 +591,12 @@ def solve(config_name: str) -> None:
         L2_tv = tv_lp_loss(pow = 2)
         
         if optimizer_select == "adam":
-            params_group1 = {'params': z, 'lr': lr}
-            params_group2 = {'params': t_ada, 'lr': lr_t_ada}
-            params_group3 = {'params': img_rep.parameters(), 'lr': dip_lr}
-            optimizer = torch.optim.AdamW([params_group1, params_group2, params_group3])
+            # params_group1 = {'params': z, 'lr': lr}
+            params_group1 = {'params': t_ada, 'lr': lr_t_ada}
+            params_group2 = {'params': img_rep.parameters(), 'lr': dip_lr}
+            optimizer = torch.optim.AdamW([params_group1, params_group2])
             dip_optimizer = torch.optim.AdamW(img_rep.parameters(), lr=dip_lr)
-        elif optimizer_select == "lbfgs":
-            optimizer_z = torch.optim.LBFGS([z], lr=lr, max_iter=50, history_size=50, line_search_fn="strong_wolfe")
-            optimizer_t = torch.optim.LBFGS([t_ada], lr=lr_t_ada, max_iter=50, history_size=50, line_search_fn="strong_wolfe")
-        
+
 
         psnrs = []
         losses = []
@@ -617,30 +605,32 @@ def solve(config_name: str) -> None:
         # Current memory usage by tensors (in MB)
         print("Init Opt Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
         print("Init Opt Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB")
-        decoded_output = None
+        img_mixture = None
         
         def closure():
-            nonlocal decoded_output
+            nonlocal img_mixture
             optimizer.zero_grad()
             # torch.cuda.reset_peak_memory_stats()
             with torch.amp.autocast("cuda", dtype=data_type):
+                img_reparam = img_rep(img_z).reshape([1, -1, image_size, image_size])
+                z = encode(img_reparam)
                 x_t = checkpoint(checkpointed_integrate, z, t_ada)
-                x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
-                decoded_output = torch.sin(vae.decode(x_t).sample)
-                img_residual = img_rep(img_z).reshape(decoded_output.shape)
+                decoded_output = torch.sin(decode(x_t))
+                img_mixture = beta * decoded_output + (1 - beta) * img_reparam
 
                 if measure_config['operator']['name'] == 'inpainting':
-                    operator_decoded_output = operator.forward(decoded_output, mask=mask)
-                    operator_residual_output = operator.forward(decoded_output.detach() + img_residual, mask=mask)
+                    operator_mixture_output = operator.forward(img_mixture, mask=mask)
+                    operator_reparam_output = operator.forward(img_reparam, mask=mask)
                 else:
-                    operator_decoded_output = operator.forward(decoded_output)
-                    operator_residual_output = operator.forward(decoded_output.detach() + img_residual)
+                    operator_mixture_output = operator.forward(img_mixture)
+                    operator_reparam_output = operator.forward(img_reparam)
 
-                loss = criterion(operator_decoded_output, y_n) + criterion(operator_residual_output, y_n)
-                encoded = vae.encode(decoded_output).latent_dist.sample()
-                loss += vae_weight * criterion(x_t, encoded)
-                loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
-                loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
+                loss = criterion(operator_mixture_output, y_n) + criterion(operator_reparam_output, y_n)
+                # encoded = vae.encode(decoded_output).latent_dist.sample()                
+                # loss += vae_weight * criterion(x_t, encoded)
+                loss += vae_weight * (x_t**2 / 2).mean()
+                loss += lpips_weight * percep_loss_fn((operator_mixture_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
+                loss += TV_reg_weight * L1_tv(img_mixture) / L2_tv(img_mixture) / img_mixture.numel() / 2.0
                 loss *= loss_multiplier
             
             loss = loss.float()
@@ -653,100 +643,40 @@ def solve(config_name: str) -> None:
             return loss
         
         def dip_closure():
-            nonlocal decoded_output
+            nonlocal img_mixture
             optimizer.zero_grad()
             # torch.cuda.reset_peak_memory_stats()
             with torch.amp.autocast("cuda", dtype=data_type):
-                x_t = checkpoint(checkpointed_integrate, z.detach(), t_ada.detach())
-                x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
-                decoded_output = torch.sin(vae.decode(x_t).sample)
-                img_residual = img_rep(img_z).reshape(decoded_output.shape)
-
-                if measure_config['operator']['name'] == 'inpainting':
-                    operator_decoded_output = operator.forward(decoded_output, mask=mask).detach()
-                    operator_residual_output = operator.forward(decoded_output.detach() + img_residual, mask=mask)
-                else:
-                    operator_decoded_output = operator.forward(decoded_output).detach()
-                    operator_residual_output = operator.forward(decoded_output.detach() + img_residual)
-
-                loss = criterion(operator_decoded_output, y_n) + criterion(operator_residual_output, y_n)
-                encoded = vae.encode(decoded_output).latent_dist.sample()
-                loss += vae_weight * criterion(x_t, encoded)
-                loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
-                loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
-                loss *= loss_multiplier
-            
-            loss = loss.float()
-            scaler.scale(loss).backward()
-            # Report peak memory used in MB
-            # peak_memory = torch.cuda.max_memory_allocated() / 1024**2
-            # print(f"Peak GPU memory used: {peak_memory:.2f} MB")
-            # print("gradient z: ", z.grad.min(), z.grad.max())
-
-            return loss
-
-
-        def closure_z():
-            nonlocal decoded_output
-            optimizer_z.zero_grad()
-            # torch.cuda.reset_peak_memory_stats()
-            with torch.amp.autocast("cuda", dtype=data_type):
+                img_reparam = img_rep(img_z).reshape([1, -1, image_size, image_size])
+                z = encode(img_reparam)
                 x_t = checkpoint(checkpointed_integrate, z, t_ada)
-                x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
-                decoded_output = torch.sin(vae.decode(x_t).sample)
+                decoded_output = torch.sin(decode(x_t))
+                img_mixture = beta * decoded_output + (1 - beta) * img_reparam
 
                 if measure_config['operator']['name'] == 'inpainting':
-                    operator_decoded_output = operator.forward(decoded_output, mask=mask)
+                    operator_mixture_output = operator.forward(img_mixture, mask=mask)
+                    operator_reparam_output = operator.forward(img_reparam, mask=mask)
                 else:
-                    operator_decoded_output = operator.forward(decoded_output)
+                    operator_mixture_output = operator.forward(img_mixture)
+                    operator_reparam_output = operator.forward(img_reparam)
 
-                loss = criterion(operator_decoded_output, y_n)
-                encoded = vae.encode(decoded_output).latent_dist.sample()
-                loss += vae_weight * criterion(x_t, encoded)
-                loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
-                loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
+                loss = criterion(operator_mixture_output, y_n) + criterion(operator_reparam_output, y_n)
+                # encoded = vae.encode(decoded_output).latent_dist.sample()                
+                # loss += vae_weight * criterion(x_t, encoded)
+                loss += vae_weight * (x_t**2 / 2).mean()
+                loss += lpips_weight * percep_loss_fn((operator_mixture_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
+                loss += TV_reg_weight * L1_tv(img_mixture) / L2_tv(img_mixture) / img_mixture.numel() / 2.0
                 loss *= loss_multiplier
             
             loss = loss.float()
-            scaler.scale(loss).backward()
+            # scaler.scale(loss).backward()
+            loss.backward()
             # Report peak memory used in MB
             # peak_memory = torch.cuda.max_memory_allocated() / 1024**2
             # print(f"Peak GPU memory used: {peak_memory:.2f} MB")
             # print("gradient z: ", z.grad.min(), z.grad.max())
 
             return loss
-
-
-        def closure_t():
-            nonlocal decoded_output
-            optimizer_t.zero_grad()
-            # torch.cuda.reset_peak_memory_stats()
-            with torch.amp.autocast("cuda", dtype=data_type):
-                x_t = checkpoint(checkpointed_integrate, z, t_ada)
-                x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
-                decoded_output = torch.sin(vae.decode(x_t).sample)
-
-                if measure_config['operator']['name'] == 'inpainting':
-                    operator_decoded_output = operator.forward(decoded_output, mask=mask)
-                else:
-                    operator_decoded_output = operator.forward(decoded_output)
-
-                loss = criterion(operator_decoded_output, y_n)
-                encoded = vae.encode(decoded_output).latent_dist.sample()
-                loss += vae_weight * criterion(x_t, encoded)
-                loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
-                loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
-                loss *= loss_multiplier
-            
-            loss = loss.float()
-            scaler.scale(loss).backward()
-            # Report peak memory used in MB
-            # peak_memory = torch.cuda.max_memory_allocated() / 1024**2
-            # print(f"Peak GPU memory used: {peak_memory:.2f} MB")
-            # print("gradient z: ", z.grad.min(), z.grad.max())
-
-            return loss
-
         
         for iterator in tqdm.tqdm(range(epochs)):
             # print("Iter: ", iterator)
@@ -756,9 +686,9 @@ def solve(config_name: str) -> None:
                 loss = optimizer.step(closure)
                 new_lr = lr_t_ada * (decay_factor ** iterator)
                 optimizer.param_groups[1]['lr'] = new_lr
-            elif optimizer_select == "lbfgs":
-                _ = optimizer_z.step(closure_z)
-                loss = optimizer_t.step(closure_t)
+                if (iterator + 1) % 100 == 0:
+                    beta = beta * beta_decay
+
             # scheduler.step()
 
             losses.append(loss.item())
@@ -769,7 +699,7 @@ def solve(config_name: str) -> None:
             
             # Evaluate
             with torch.no_grad():
-                output = decoded_output.detach().float()
+                output = img_mixture.detach().float()
                 lpips_score = lpips_loss_fn(output, ref_img).mean()
                 output_numpy = np.clip((output.cpu().squeeze().numpy() + 1) / 2, 0, 1)
                 output_numpy = np.transpose(
@@ -787,7 +717,7 @@ def solve(config_name: str) -> None:
 
                 metrics_to_log = {
                     "epoch": iterator,
-                    "t_ada": (1000 * torch.sigmoid(t_ada)).item(),
+                    "t_ada": (1000 * torch.sigmoid(12.0 * t_ada - 6.0)).item(),
                     "loss": loss.item()/loss_multiplier,
                     "psnr": tmp_psnr,
                     "lpips": lpips_score.item(),
