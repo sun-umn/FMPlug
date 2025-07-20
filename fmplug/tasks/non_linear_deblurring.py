@@ -14,7 +14,7 @@ from diffusers import AutoencoderTiny, StableDiffusion3Img2ImgPipeline
 from skimage.metrics import peak_signal_noise_ratio
 
 # first party
-from fmplug.ode_solver.euler import integrate_euler
+from fmplug.ode_solver.euler import integrate_euler_v2 as integrate_euler
 from fmplug.tasks.utils import compute_ssim, prepare_measurement
 from fmplug.utils.measurements import get_noise, get_operator
 
@@ -388,9 +388,8 @@ def non_linear_deblurring_task(config_name: str) -> None:
             x0=z,
             timesteps=timesteps,
             sigmas=sigmas,
-            prompt_embedding=prompt_embedding,
-            pooled_embedding=pooled_embedding,
-            device=device,
+            prompt_embeds=prompt_embedding,
+            pooled_prompt_embeds=pooled_embedding,
             guidance_scale=guidance_scale,
         )
 

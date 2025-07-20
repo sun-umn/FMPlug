@@ -10,21 +10,21 @@ import numpy as np
 import torch
 import tqdm
 import wandb
-from diffusers import AutoencoderTiny, StableDiffusion3Img2ImgPipeline
+from diffusers import StableDiffusion3Img2ImgPipeline
 from skimage.metrics import peak_signal_noise_ratio
 
 # first party
-from fmplug.ode_solver.euler import integrate_euler
+from fmplug.ode_solver.euler import integrate_euler_v2 as integrate_euler
 from fmplug.tasks.utils import compute_ssim, prepare_measurement
 from fmplug.utils.measurements import get_noise, get_operator
 
 # These presets are used for torch compile for SD3
 torch.set_float32_matmul_precision("high")
 
-torch._inductor.config.conv_1x1_as_mm = True
-torch._inductor.config.coordinate_descent_tuning = True
-torch._inductor.config.epilogue_fusion = False
-torch._inductor.config.coordinate_descent_check_all_directions = True
+# torch._inductor.config.conv_1x1_as_mm = True
+# torch._inductor.config.coordinate_descent_tuning = True
+# torch._inductor.config.epilogue_fusion = False
+# torch._inductor.config.coordinate_descent_check_all_directions = True
 
 
 def set_seed(seed):
@@ -125,7 +125,7 @@ def super_resolution_task(config_name: str) -> None:
 
     print("Load in SD3 image to image model ...")
     # Enable a tiny autoencoder
-    vae = AutoencoderTiny.from_pretrained("madebyollin/taesd3", torch_dtype=dtype)
+    # vae = AutoencoderTiny.from_pretrained("madebyollin/taesd3", torch_dtype=dtype)
 
     pipe = StableDiffusion3Img2ImgPipeline.from_pretrained(
         "stabilityai/stable-diffusion-3-medium-diffusers",
@@ -135,17 +135,17 @@ def super_resolution_task(config_name: str) -> None:
     )
 
     # Set new vae
-    pipe.vae = vae
-    pipe.vae.config.shift_factor = 0.0
+    # pipe.vae = vae
+    # pipe.vae.config.shift_factor = 0.0
 
     pipe = pipe.to(device)
 
     # Add these lines to enable torch compile which is expected to
     # increase the speed
-    pipe.set_progress_bar_config(disable=True)
+    # pipe.set_progress_bar_config(disable=True)
 
-    pipe.transformer.to(memory_format=torch.channels_last)
-    pipe.vae.to(memory_format=torch.channels_last)
+    # pipe.transformer.to(memory_format=torch.channels_last)
+    # pipe.vae.to(memory_format=torch.channels_last)
 
     # pipe.transformer = torch.compile(
     #     pipe.transformer, mode="max-autotune", fullgraph=True
@@ -153,9 +153,6 @@ def super_resolution_task(config_name: str) -> None:
     # pipe.vae.decode = torch.compile(
     #     pipe.vae.decode, mode="max-autotune", fullgraph=True
     # )
-
-    pipe.transformer = torch.compile(pipe.transformer, mode="default", fullgraph=True)
-    pipe.vae.decode = torch.compile(pipe.vae.decode, mode="default", fullgraph=True)
 
     # Extract different components of the pipeline
     prompt_encoder = pipe.encode_prompt
@@ -341,7 +338,7 @@ def super_resolution_task(config_name: str) -> None:
     # Should we try a compile warmup here -
     # z will not be updated as long as we are not updating
     print("Staring compile warmup ...")
-    noise = torch.randn(z.shape, generator=None, dtype=dtype, layout=None).to(device)
+    # noise = torch.randn(z.shape, generator=None, dtype=dtype, layout=None).to(device)
 
     # with torch.no_grad():
     #     for _ in range(3):
@@ -371,7 +368,7 @@ def super_resolution_task(config_name: str) -> None:
     #         decoded_output = torch.clamp(vae.decode(decoded_latent).sample, -1.0, 1.0)
 
     # print("Ending compile warmup ...")
-    noise = torch.randn(z.shape, generator=None, dtype=dtype, layout=None).to(device)
+    # noise = torch.randn(z.shape, generator=None, dtype=dtype, layout=None).to(device)
     lpips_scores = []
     early_stopping_criterion = 0
 
@@ -390,26 +387,25 @@ def super_resolution_task(config_name: str) -> None:
                 x0=z,
                 timesteps=timesteps,
                 sigmas=sigmas,
-                prompt_embedding=prompt_embedding,
-                pooled_embedding=pooled_embedding,
-                device=device,
+                prompt_embeds=prompt_embedding,
+                pooled_prompt_embeds=pooled_embedding,
                 guidance_scale=guidance_scale,
             )
 
             # Implment steps to rescale x_t
-            last_sigma = sigmas[-1]
+            # last_sigma = sigmas[-1]
 
             # Step 1: Add noise inverse
-            decoded_latent = (x_t - last_sigma * noise) / (1 - last_sigma)
+            # decoded_latent = (x_t - last_sigma * noise) / (1 - last_sigma)
             # decoded_latent = x_t
 
             # Step 2: Add shift and scale inverse
-            decoded_latent = (
-                decoded_latent / vae.config.scaling_factor
-            ) + vae.config.shift_factor
+            # decoded_latent = (
+            #     decoded_latent / vae.config.scaling_factor
+            # ) + vae.config.shift_factor
 
             # Step 3: Decode using VAE / AE - this output is [-1, 1]
-            decoded_output = torch.clamp(vae.decode(decoded_latent).sample, -1.0, 1.0)
+            decoded_output = torch.clamp(vae.decode(x_t).sample, -1.0, 1.0)
 
             # Now apply the degradation
             operator_decoded_output = operator.forward(decoded_output)  # type: ignore
@@ -448,6 +444,8 @@ def super_resolution_task(config_name: str) -> None:
 
         # What is the gradient norm?
         grad_norm = z.grad.norm()
+
+        # total_norm = torch.norm(decoder_model.up_blocks[-1].parameters(), 2)
 
         # Compute the PSNR & print loss
         with torch.no_grad():
@@ -491,19 +489,19 @@ def super_resolution_task(config_name: str) -> None:
             else:
                 best_lpips = current_lpips
 
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 10))
+            # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 10))
 
-            ax1.imshow(img)
-            ax1.set_title("Original Image")
+            # ax1.imshow(img)
+            # ax1.set_title("Original Image")
 
-            ax2.imshow(model_img)
-            ax2.set_title("Reconstructed Image")
+            # ax2.imshow(model_img)
+            # ax2.set_title("Reconstructed Image")
 
-            image_save_path = os.path.join(
-                save_file_path, f"reference_vs_generated_image_epoch_{idx + 1}.png"
-            )
-            fig.savefig(image_save_path, bbox_inches="tight")
-            plt.close(fig)
+            # image_save_path = os.path.join(
+            #     save_file_path, f"reference_vs_generated_image_epoch_{idx + 1}.png"
+            # )
+            # fig.savefig(image_save_path, bbox_inches="tight")
+            # plt.close(fig)
 
             if current_lpips <= best_lpips:
                 # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 10))

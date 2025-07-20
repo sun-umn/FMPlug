@@ -1,15 +1,16 @@
 # stdlib
 import os
 import random
+import time
 
 # third party
 import lpips
+import matplotlib.pyplot as plt
 import numpy as np
-import optuna
 import torch
 import tqdm
 import wandb
-from diffusers import AutoencoderTiny, StableDiffusion3Img2ImgPipeline
+from diffusers import StableDiffusion3Img2ImgPipeline
 from skimage.metrics import peak_signal_noise_ratio
 
 # first party
@@ -20,10 +21,10 @@ from fmplug.utils.measurements import get_noise, get_operator
 # These presets are used for torch compile for SD3
 torch.set_float32_matmul_precision("high")
 
-torch._inductor.config.conv_1x1_as_mm = True
-torch._inductor.config.coordinate_descent_tuning = True
-torch._inductor.config.epilogue_fusion = False
-torch._inductor.config.coordinate_descent_check_all_directions = True
+# torch._inductor.config.conv_1x1_as_mm = True
+# torch._inductor.config.coordinate_descent_tuning = True
+# torch._inductor.config.epilogue_fusion = False
+# torch._inductor.config.coordinate_descent_check_all_directions = True
 
 
 def set_seed(seed):
@@ -45,7 +46,26 @@ def total_variation_loss(x):
     )
 
 
-def optunized_non_linear_deblurring() -> None:
+def super_resolution_task(config_name: str) -> None:
+    # Configuration
+    image_size = 512
+    scale_factor = 4
+    num_inference_steps = 5
+    batch_size = 1
+    guidance_scale = 1.0
+    optimizer_name = "Adam"
+    lr = 1e-2
+    weight_decay = 0.0
+    epochs = 5000
+    dtype = torch.float32
+
+    # NOTE: Seed was 123
+    set_seed(123)
+
+    # Log into huggingface to be able to pull the SD3.0
+    # print("Log into HuggingFace ...")
+    # login(os.environ.get("HF_ACCESS_TOKEN"))
+
     # Global variables for wandb
     API_KEY = os.environ.get("WANDB_API_KEY")
     PROJECT_NAME = "FMPlug"
@@ -57,8 +77,17 @@ def optunized_non_linear_deblurring() -> None:
     wandb_instance = wandb.init(  # type: ignore
         # set the wandb project where this run will be logged
         project=PROJECT_NAME,
-        tags=["Optunized Non-linear Deblurring"],
-        config={},
+        tags=["Experimental", "super resolution"],
+        config={
+            "optimizer_name": optimizer_name,
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "epochs": epochs,
+            "image_size": image_size,
+            "scale_factor": scale_factor,
+            "num_inference_steps": num_inference_steps,
+            "guidance_scale": guidance_scale,
+        },
     )
 
     # Create the directory to save all of the model results
@@ -66,49 +95,27 @@ def optunized_non_linear_deblurring() -> None:
     save_file_path = f"/users/5/dever120/FMPlug/experiments/{wandb_experiment_id}"
     os.makedirs(save_file_path, exist_ok=True)
 
-    study = optuna.create_study()
-    study.optimize(non_linear_deblurring_task, n_trials=3)  # type: ignore
-
-
-def non_linear_deblurring_task(trial) -> None:
-    # Configuration
-    # Optunized variables
-    num_inference_steps = trial.suggest_int("num_inference_steps", 5, 10)
-    lr = trial.suggest_float("lr", 1e-3, 1.0)
-    gradient_clipping_norm = trial.suggest_float("gradient_clipping_norm", 0.01, 0.3)
-    lpips_weight = trial.suggest_float("lpips_weight", 0.05, 1.0)
-
-    image_size = 256
-    batch_size = 1
-    guidance_scale = 2.0
-    optimizer_name = "Adam"
-    weight_decay = 0.0
-    epochs = 2500
-    dtype = torch.float32
-
-    # NOTE: Seed was 123
-    set_seed(123)
-
     # Setup device as cuda
     device = torch.device("cuda")
 
     # Initialize LPIPS model (use net='vgg' for VGG-based)
     lpips_loss_fn = lpips.LPIPS(net="vgg").to(device)
 
-    # non-linear deblurring config
+    # Super resolution config
     config = {
         "measurement": {
             "operator": {
-                "name": "nonlinear_blur",
-                "opt_yml_path": "./bkse/options/generate_blur/default.yml",
+                "name": "super_resolution",
+                "in_shape": (1, 3, image_size, image_size),
+                "scale_factor": scale_factor,
             },
-            "noise": {"name": "gaussian", "sigma": 0.03},
-        }
+            "noise": {"name": "gaussian", "sigma": 0.0},
+        },
     }
 
     # Load in an image & measurement
     img_outputs = prepare_measurement(
-        image_path="/users/5/dever120/FMPlug/data/div2k_example.png",  # Hardcode for now  # noqa
+        image_path="/users/5/dever120/FMPlug/data/afhq_cat.png",  # Hardcode for now  # noqa
         image_size=image_size,
         config=config,
         get_operator_fn=get_operator,
@@ -118,7 +125,7 @@ def non_linear_deblurring_task(trial) -> None:
 
     print("Load in SD3 image to image model ...")
     # Enable a tiny autoencoder
-    vae = AutoencoderTiny.from_pretrained("madebyollin/taesd3", torch_dtype=dtype)
+    # vae = AutoencoderTiny.from_pretrained("madebyollin/taesd3", torch_dtype=dtype)
 
     pipe = StableDiffusion3Img2ImgPipeline.from_pretrained(
         "stabilityai/stable-diffusion-3-medium-diffusers",
@@ -128,17 +135,17 @@ def non_linear_deblurring_task(trial) -> None:
     )
 
     # Set new vae
-    pipe.vae = vae
-    pipe.vae.config.shift_factor = 0.0
+    # pipe.vae = vae
+    # pipe.vae.config.shift_factor = 0.0
 
     pipe = pipe.to(device)
 
     # Add these lines to enable torch compile which is expected to
     # increase the speed
-    pipe.set_progress_bar_config(disable=True)
+    # pipe.set_progress_bar_config(disable=True)
 
-    pipe.transformer.to(memory_format=torch.channels_last)
-    pipe.vae.to(memory_format=torch.channels_last)
+    # pipe.transformer.to(memory_format=torch.channels_last)
+    # pipe.vae.to(memory_format=torch.channels_last)
 
     # pipe.transformer = torch.compile(
     #     pipe.transformer, mode="max-autotune", fullgraph=True
@@ -146,9 +153,6 @@ def non_linear_deblurring_task(trial) -> None:
     # pipe.vae.decode = torch.compile(
     #     pipe.vae.decode, mode="max-autotune", fullgraph=True
     # )
-
-    # pipe.transformer = torch.compile(pipe.transformer, mode="default", fullgraph=True)
-    # pipe.vae.decode = torch.compile(pipe.vae.decode, mode="default", fullgraph=True)
 
     # Extract different components of the pipeline
     prompt_encoder = pipe.encode_prompt
@@ -168,7 +172,10 @@ def non_linear_deblurring_task(trial) -> None:
     # vae.enable_gradient_checkpointing()
 
     # Define the prompts and embeddings
-    prompt = "a high quality photo of animal, bush, close-up, fox, grass, green, greenery, hide, panda, red, red panda, stare"  # noqa
+    # prompt = "a high quality photo of animal, bush, close-up, fox, grass, green, greenery, hide, panda, red, red panda, stare"  # noqa
+    # prompt = "a high quality photo of animal, rocks, close-up, penguin, rocky landscape, full body national geographic penguin"  # noqa
+    # prompt = "A penguin with striking yellow eyebrows stands on rocky terrain, extending one flipper outward as if in mid-motion or display"  # noqa
+    prompt = "A close-up portrait of a calico cat with green eyes, high detail, soft lighting, white background, symmetrical face, photorealistic, 4K resolution, shallow depth of field"  # noqa
     prompt_2 = None
     prompt_3 = None
 
@@ -176,7 +183,7 @@ def non_linear_deblurring_task(trial) -> None:
     negative_prompt_2 = None
     negative_prompt_3 = None
 
-    do_classifier_free_guidance = True
+    do_classifier_free_guidance = guidance_scale > 1.0
     prompt_embeds = None
     negative_prompt_embeds = None
     pooled_prompt_embeds = None
@@ -214,10 +221,14 @@ def non_linear_deblurring_task(trial) -> None:
         )
 
     # prompt embeds with classifier free guidance
-    prompt_embedding = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-    pooled_embedding = torch.cat(
-        [negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0
-    )
+    prompt_embedding = prompt_embeds
+    pooled_embedding = pooled_prompt_embeds
+
+    if do_classifier_free_guidance:
+        prompt_embedding = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+        pooled_embedding = torch.cat(
+            [negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0
+        )
 
     # Define the latent time steps here
     timesteps = pipe.scheduler.timesteps
@@ -288,9 +299,34 @@ def non_linear_deblurring_task(trial) -> None:
     z = torch.nn.parameter.Parameter(z)
     z = z.to(device=device, dtype=dtype)
 
+    # # Make the decoder parameters trainable
+    # for name, parameters in vae.named_parameters():
+    #     if "up_blocks.3" in name:
+    #         parameters.requires_grad = True
+
+    # for name, parameters in vae.named_parameters():
+    #     if "up_blocks.2" in name:
+    #         parameters.requires_grad = True
+
+    # for name, parameters in vae.named_parameters():
+    #     if "up_blocks.1" in name:
+    #         parameters.requires_grad = True
+
+    # for name, parameters in vae.named_parameters():
+    #     if "up_blocks.0" in name:
+    #         parameters.requires_grad = True
+
     # Setup optimizer
     if optimizer_name == "Adam":
-        optimizer = torch.optim.Adam([z], lr=lr)
+        optimizer = torch.optim.Adam(
+            [
+                {"params": [z], "lr": 1e-1},
+                # {"params": vae.decoder.up_blocks[-1].parameters(), "lr": 1e-3},
+                # {"params": vae.decoder.up_blocks[-2].parameters(), "lr": 1e-4},
+                # {"params": vae.decoder.up_blocks[1].parameters(), "lr": 1e-4},
+                # {"params": vae.decoder.up_blocks[0].parameters(), "lr": 1e-5},
+            ]
+        )
 
     elif optimizer_name == "AdamW":
         optimizer = torch.optim.AdamW([z], lr=lr, weight_decay=weight_decay)  # type: ignore  # noqa
@@ -299,7 +335,8 @@ def non_linear_deblurring_task(trial) -> None:
     operator = img_outputs["operator"]
 
     # Create the loss function
-    criterion = torch.nn.MSELoss()
+    # criterion = torch.nn.MSELoss()
+    criterion = torch.nn.L1Loss()
 
     # Try the grad scaler for fp16
     scaler = torch.amp.GradScaler()
@@ -319,22 +356,22 @@ def non_linear_deblurring_task(trial) -> None:
     # Function for integration
     # @torch.compile
     def f(x, t, prompt_embedding, pooled_embedding, device):
-        with torch.amp.autocast(device.type, dtype=torch.float16):
-            result = transformer(
-                hidden_states=x,
-                timestep=t,
-                encoder_hidden_states=prompt_embedding,
-                pooled_projections=pooled_embedding,
-                joint_attention_kwargs=None,
-                return_dict=False,
-            )[0]
+        # with torch.amp.autocast(device.type, dtype=torch.float16):
+        result = transformer(
+            hidden_states=x,
+            timestep=t,
+            encoder_hidden_states=prompt_embedding,
+            pooled_projections=pooled_embedding,
+            joint_attention_kwargs=None,
+            return_dict=False,
+        )[0]
 
         return result
 
     # Should we try a compile warmup here -
     # z will not be updated as long as we are not updating
     print("Staring compile warmup ...")
-    noise = torch.randn(z.shape, generator=None, dtype=dtype, layout=None).to(device)
+    # noise = torch.randn(z.shape, generator=None, dtype=dtype, layout=None).to(device)
 
     # with torch.no_grad():
     #     for _ in range(3):
@@ -364,11 +401,11 @@ def non_linear_deblurring_task(trial) -> None:
     #         decoded_output = torch.clamp(vae.decode(decoded_latent).sample, -1.0, 1.0)
 
     # print("Ending compile warmup ...")
-    noise = torch.randn(z.shape, generator=None, dtype=dtype, layout=None).to(device)
+    # noise = torch.randn(z.shape, generator=None, dtype=dtype, layout=None).to(device)
     lpips_scores = []
-    # early_stopping_criterion = 0
+    early_stopping_criterion = 0
 
-    # start = time.time()
+    start = time.time()
     for idx, epoch in tqdm.tqdm(enumerate(range(epochs))):
         torch.compiler.cudagraph_mark_step_begin()
 
@@ -377,51 +414,52 @@ def non_linear_deblurring_task(trial) -> None:
 
         # If this is the first pass we have our latent variable established
         # pass it through the ODE solver
-        x_t = integrate_euler(
-            f=f,
-            x0=z,
-            timesteps=timesteps,
-            sigmas=sigmas,
-            prompt_embeds=prompt_embedding,
-            pooled_prompt_embeds=pooled_embedding,
-            guidance_scale=guidance_scale,
-        )
+        with torch.amp.autocast(device.type, dtype=torch.float32):
+            x_t = integrate_euler(
+                f=f,
+                x0=z,
+                timesteps=timesteps,
+                sigmas=sigmas,
+                prompt_embeds=prompt_embedding,
+                pooled_prompt_embeds=pooled_embedding,
+                guidance_scale=guidance_scale,
+            )
 
-        # Implment steps to rescale x_t
-        last_sigma = sigmas[-1]
+            # Implment steps to rescale x_t
+            # last_sigma = sigmas[-1]
 
-        # Step 1: Add noise inverse
-        decoded_latent = (x_t - last_sigma * noise) / (1 - last_sigma)
-        # decoded_latent = x_t
+            # Step 1: Add noise inverse
+            # decoded_latent = (x_t - last_sigma * noise) / (1 - last_sigma)
+            # decoded_latent = x_t
 
-        # Step 2: Add shift and scale inverse
-        decoded_latent = (
-            decoded_latent / vae.config.scaling_factor
-        ) + vae.config.shift_factor
+            # Step 2: Add shift and scale inverse
+            # decoded_latent = (
+            #     decoded_latent / vae.config.scaling_factor
+            # ) + vae.config.shift_factor
 
-        # Step 3: Decode using VAE / AE - this output is [-1, 1]
-        decoded_output = torch.clamp(vae.decode(decoded_latent).sample, -1.0, 1.0)
+            # Step 3: Decode using VAE / AE - this output is [-1, 1]
+            decoded_output = torch.clamp(vae.decode(x_t).sample, -1.0, 1.0)
 
-        # Now apply the degradation
-        operator_decoded_output = operator.forward(decoded_output)  # type: ignore
+            # Now apply the degradation
+            operator_decoded_output = operator.forward(decoded_output)  # type: ignore
 
-        # Apply the loss function - this expects [-1, 1]
-        mse_loss = criterion(operator_decoded_output, y_n)
-        lpips_loss = lpips_loss_fn(operator_decoded_output, y_n)
-        tv_loss = total_variation_loss(decoded_output)
+            # Apply the loss function - this expects [-1, 1]
+            mse_loss = criterion(operator_decoded_output, y_n)
+            lpips_loss = lpips_loss_fn(operator_decoded_output, y_n)
+            tv_loss = total_variation_loss(decoded_output)
 
-        # What if we also wanted to measure mse in the latent space?
-        # We would want to prepare the latents based on the last time
-        # step
-        # Why are we using the last timestep to encode? This is because
-        # We will add minimum noise to encode the measurment
-        # latent_y_n = vae.encode(y_n).latents
+            # What if we also wanted to measure mse in the latent space?
+            # We would want to prepare the latents based on the last time
+            # step
+            # Why are we using the last timestep to encode? This is because
+            # We will add minimum noise to encode the measurment
+            # latent_y_n = vae.encode(y_n).latents
 
-        # # Encode the degraded output
-        # latent_operator_decoded_output = vae.encode(operator_decoded_output).latents  # noqa
-        # latent_mse = criterion(latent_operator_decoded_output, latent_y_n)
+            # # Encode the degraded output
+            # latent_operator_decoded_output = vae.encode(operator_decoded_output).latents  # noqa
+            # latent_mse = criterion(latent_operator_decoded_output, latent_y_n)
 
-        loss = mse_loss + lpips_weight * lpips_loss + 0.1 * tv_loss
+            loss = mse_loss + lpips_loss + 0.1 * tv_loss
 
         # Update gradients of z
         scaler.scale(loss).backward()
@@ -430,15 +468,49 @@ def non_linear_deblurring_task(trial) -> None:
         scaler.unscale_(optimizer)
 
         # Clip gradients (example: max norm = 1.0)
-        torch.nn.utils.clip_grad_norm_([z], max_norm=gradient_clipping_norm)
+        # torch.nn.utils.clip_grad_norm_([z], max_norm=0.025)
+        # torch.nn.utils.clip_grad_norm_(
+        #     list(vae.decoder.up_blocks[-1].parameters()), max_norm=0.25
+        # )
+        # torch.nn.utils.clip_grad_norm_(
+        #     list(vae.decoder.up_blocks[-2].parameters()), max_norm=0.25
+        # )
+        # torch.nn.utils.clip_grad_norm_(
+        #     list(vae.decoder.up_blocks[1].parameters()), max_norm=0.25
+        # )
+        # torch.nn.utils.clip_grad_norm_(
+        #     list(vae.decoder.up_blocks[0].parameters()), max_norm=0.25
+        # )
 
         scaler.step(optimizer)
         scaler.update()
 
+        # What is the gradient norm?
+        grad_norm = z.grad.norm()
+        # total_norm1 = torch.norm(
+        #     torch.stack(
+        #         [
+        #             p.grad.norm(2)
+        #             for p in vae.decoder.up_blocks[-1].parameters()
+        #             if p.grad is not None
+        #         ]
+        #     ),
+        #     2,
+        # )
+        # total_norm2 = torch.norm(
+        #     torch.stack(
+        #         [
+        #             p.grad.norm(2)
+        #             for p in vae.decoder.up_blocks[-2].parameters()
+        #             if p.grad is not None
+        #         ]
+        #     ),
+        #     2,
+        # )
+
         # scheduler.step()
 
-        # What is the gradient norm?
-        # grad_norm = z.grad.norm()
+        # total_norm = torch.norm(decoder_model.up_blocks[-1].parameters(), 2)
 
         # Compute the PSNR & print loss
         with torch.no_grad():
@@ -460,15 +532,79 @@ def non_linear_deblurring_task(trial) -> None:
             model_img = model_img.transpose(1, 2, 0)  # type: ignore
 
             psnr_score = peak_signal_noise_ratio(img, model_img)
-            # mse_score = ((img - model_img) ** 2).mean()
+            mse_score = ((img - model_img) ** 2).mean()
 
             lpips_scores.append(lpips_score.item())
 
-            # Log all metrics as trial attributes
-            trial.set_user_attr("psnr", psnr_score)
-            trial.set_user_attr("ssim", ssim_score)
-            trial.set_user_attr("lpips", lpips_score.item())
+            metrics_to_log = {
+                "epoch": epoch,
+                # "current_lr": scheduler.get_last_lr()[0],
+                "mse_loss": mse_score,
+                "psnr": psnr_score,
+                "ssim": ssim_score,
+                "lpips": lpips_score.item(),
+                "grad_norm": grad_norm,
+                # "total_norm1": total_norm1,
+                # "total_norm2": total_norm2,
+            }
+            wandb.log(metrics_to_log)  # type: ignore
 
-            print(psnr_score, ssim_score, lpips_score.item())
+            current_lpips = lpips_scores[-1]
 
-    return lpips_score.item()
+            if len(lpips_scores) > 1:
+                best_lpips = np.min(lpips_scores[:-1])
+            else:
+                best_lpips = current_lpips
+
+            if idx == 0:
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 10))
+
+                ax1.imshow(img)
+                ax1.set_title("Original Image")
+
+                ax2.imshow(model_img)
+                ax2.set_title("Generated Image @ First Epoch")
+
+                image_save_path = os.path.join(
+                    save_file_path, f"reference_vs_generated_image_epoch_{idx + 1}.png"
+                )
+                fig.savefig(image_save_path, bbox_inches="tight")
+                plt.close(fig)
+
+            if current_lpips <= best_lpips:
+                # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 10))
+
+                # ax1.imshow(img)
+                # ax1.set_title("Original Image")
+
+                # ax2.imshow(model_img)
+                # ax2.set_title("Reconstructed Image")
+
+                # image_save_path = os.path.join(
+                #     save_file_path, f"reference_vs_generated_image_epoch_{idx + 1}.png"  # noqa
+                # )
+                # fig.savefig(image_save_path, bbox_inches="tight")
+
+                # Reset early stopping criterion
+                early_stopping_criterion = 0
+
+            else:
+                early_stopping_criterion += 1
+
+            # if early_stopping_criterion >= 500:
+            #     break
+
+    end = time.time()
+    print(end - start)
+
+    # The prompt is playing a major role in how good of a solution we can obtain
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 10))
+
+    ax1.imshow(img.astype(float))  # type: ignore
+    ax1.set_title("Original Image")
+
+    ax2.imshow(model_img.astype(float))  # type: ignore
+    ax2.set_title("Reconstructed Image")
+
+    image_save_path = os.path.join(save_file_path, "final_output.png")
+    fig.savefig(image_save_path, bbox_inches="tight")

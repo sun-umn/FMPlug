@@ -3,7 +3,8 @@ import click
 
 # first party
 from fmplug.tasks.non_linear_deblurring import non_linear_deblurring_task
-from fmplug.tasks.super_resolution_v1 import super_resolution_task
+from fmplug.tasks.optuna_super_resolution import optunized_super_resolution
+from fmplug.tasks.super_resolution_v3 import super_resolution_task
 from fmplug.tasks.turbulence import turbulence_task  # type: ignore
 
 
@@ -16,6 +17,12 @@ def cli():  # noqa
 @click.option("--config_name")
 def run_super_resolution_task(config_name: str) -> None:
     super_resolution_task(config_name=config_name)
+
+
+@cli.command("run-optuna-super-resolution-task")
+@click.option("--config_name")
+def run_optuna_super_resolution_task() -> None:
+    optunized_super_resolution()
 
 
 @cli.command("run-turbulence-task")
