@@ -2,6 +2,7 @@
 import click
 
 # first party
+from fmplug.tasks.discovery_tasks.sd3_regression import sd3_regression_task
 from fmplug.tasks.non_linear_deblurring import non_linear_deblurring_task
 from fmplug.tasks.optuna_super_resolution import optunized_super_resolution
 from fmplug.tasks.super_resolution_v3 import super_resolution_task
@@ -11,6 +12,12 @@ from fmplug.tasks.turbulence import turbulence_task  # type: ignore
 @click.group()
 def cli():  # noqa
     pass
+
+
+@cli.command("run-sd3-regression-task")
+@click.option("--config_name")
+def run_sd3_regression_task(config_name: str) -> None:
+    sd3_regression_task(config_name=config_name)
 
 
 @cli.command("run-super-resolution-task")

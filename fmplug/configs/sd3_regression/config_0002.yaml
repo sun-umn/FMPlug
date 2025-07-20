@@ -1,0 +1,9 @@
+config:
+  image_size: 512
+  scale_factor: 4
+  num_inference_steps: 3
+  guidance_scale: 2.0
+  strength: 0.2
+  batch_size: 1
+  lr: 1.0e-2
+  epochs: 5000
