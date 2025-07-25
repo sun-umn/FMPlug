@@ -186,10 +186,12 @@ class StableDiffusion3BaseV2:
         self.vae = pipe.vae
         self.vae.eval()
         self.vae.requires_grad_(False)
+        self.vae.enable_gradient_checkpointing()
 
         self.transformer = pipe.transformer.to(device)
         self.transformer.eval()
         self.transformer.requires_grad_(False)
+        self.transformer.enable_gradient_checkpointing()
 
     def encode_prompts(
         self,

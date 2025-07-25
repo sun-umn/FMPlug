@@ -7,4 +7,5 @@ config:
   batch_size: 1
   lr: 1.0e-2
   epochs: 20000
-  optimization_objective: "clean"
+  optimization_objective: "noisy"
+  collect_timesteps_and_sigmas: "FMPlug"

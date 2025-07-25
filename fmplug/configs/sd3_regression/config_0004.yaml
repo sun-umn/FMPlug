@@ -3,8 +3,8 @@ config:
   scale_factor: 4
   num_inference_steps: 3
   guidance_scale: 2.0
-  strength: 1.0
+  strength: 0.8
   batch_size: 1
   lr: 1.0e-2
   epochs: 20000
-  optimization_objective: "clean"
+  optimization_objective: "noisy"

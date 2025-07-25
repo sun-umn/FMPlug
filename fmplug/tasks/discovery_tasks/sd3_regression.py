@@ -40,6 +40,8 @@ def sd3_regression_task(config_name: str) -> None:
     num_inference_steps = config["config"].get("num_inference_steps")
     guidance_scale = config["config"].get("guidance_scale")
     strength = config["config"].get("strength")
+    optimization_objective = config["config"].get("optimization_objective")
+    collect_timesteps_and_sigmas = config["config"].get("collect_timesteps_and_sigmas")
 
     # Global variables for wandb
     API_KEY = os.environ.get("WANDB_API_KEY")
@@ -62,6 +64,8 @@ def sd3_regression_task(config_name: str) -> None:
             "guidance_scale": guidance_scale,
             "strength": strength,
             "config_name": config_name,
+            "optimization_objective": optimization_objective,
+            "collect_timesteps_and_sigmas": collect_timesteps_and_sigmas,
         },
     )
 
@@ -98,11 +102,43 @@ def sd3_regression_task(config_name: str) -> None:
     )
 
     # Collect timesteps and sigmas
-    timesteps, sigmas, _ = sd3_pipeline.retrieve_timesteps_and_sigmas(strength=strength)
+    if collect_timesteps_and_sigmas == "FMPlug":
+        # Define the latent time steps here
+        timesteps = sd3_pipeline.scheduler.timesteps
+        sigmas = sd3_pipeline.scheduler.sigmas
+
+        # After digging in I understand more how this works so we an set
+        # a paramter to say lets start in the range of timesteps 600.0
+        mask = sigmas <= strength
+        timesteps = timesteps[mask]
+        sigmas = sigmas[mask]
+
+        # Now get num_inference spaced timesteps and sigmas
+        num_inference_mask = torch.linspace(
+            0, len(timesteps) - 1, num_inference_steps
+        ).long()
+        timesteps = timesteps[num_inference_mask].to(device=device, dtype=torch.float32)
+        sigmas = sigmas[num_inference_mask].to(device, dtype=torch.float32)
+
+        zero_tensor = torch.tensor([0.0], device=device, dtype=torch.float32)
+        sigmas = torch.concatenate([sigmas, zero_tensor])
+
+    elif collect_timesteps_and_sigmas == "SD3":
+        timesteps, sigmas, _ = sd3_pipeline.retrieve_timesteps_and_sigmas(
+            strength=strength
+        )
+
+    print(timesteps)
+    print(sigmas)
 
     ref_img = img_outputs["ref_img"].squeeze(0).permute(1, 2, 0).cpu()
     ref_img = (ref_img + 1.0) / 2.0
     ref_img = ref_img.to(device)
+
+    # Create a reference image with noise
+    noisy_ref_img = ref_img + 0.03 * torch.randn(
+        ref_img.shape, device=device, dtype=torch.float32
+    )
 
     # This is where we will handle different strengths
     # The vae encoder expects an image in the ranage [-1, 1]. Evidence
@@ -162,9 +198,11 @@ def sd3_regression_task(config_name: str) -> None:
     for epoch in tqdm.tqdm(range(epochs)):
         optimizer.zero_grad()
 
+        z0 = (z - z.mean()) / z.std()
+
         x_t = integrate_euler_v2(
             f=sd3_pipeline.predict,
-            x0=z,
+            x0=z0,
             timesteps=timesteps,
             sigmas=sigmas,
             prompt_embeds=prompt_embeds,
@@ -183,7 +221,11 @@ def sd3_regression_task(config_name: str) -> None:
         decoded_img = (decoded_img * 0.5) + 0.5
         decoded_img = torch.clamp(decoded_img, 0, 1)
 
-        loss = ((ref_img - decoded_img) ** 2).mean()
+        if optimization_objective == "clean":
+            loss = ((ref_img - decoded_img) ** 2).mean()
+
+        elif optimization_objective == "noisy":
+            loss = ((noisy_ref_img - decoded_img) ** 2).mean()
 
         loss.backward()
         optimizer.step()
@@ -206,9 +248,9 @@ def sd3_regression_task(config_name: str) -> None:
                 "initial_z_min": initial_z_min,
                 "initial_z_mean": initial_z_mean,
                 "initial_z_max": initial_z_max,
-                "z_min": z.min(),
-                "z_mean": z.mean(),
-                "z_max": z.max(),
+                "z_min": z0.min(),
+                "z_mean": z0.mean(),
+                "z_max": z0.max(),
             }
             wandb.log(metrics_to_log)  # type: ignore
 
