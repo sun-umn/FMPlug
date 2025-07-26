@@ -521,14 +521,14 @@ def solve(config_name: str) -> None:
             #     z = encode(blur(img))
             # else:
             #     z = encode(img)
-            z = encode(img)
-            z = np.sqrt(alpha) * z + np.sqrt(1 - alpha) * torch.randn_like(z)
-            z = z.detach()
+            latent_y = encode(img)
+            latent_y = np.sqrt(alpha) * latent_y
+            latent_y = latent_y.detach()
         
         del img
 
             
-        z = torch.nn.parameter.Parameter(z, True).to(device)
+        z = torch.nn.parameter.Parameter(torch.randn_like(latent_y), True).to(device)
         z = z.requires_grad_(True)
         # t_ada = torch.tensor(12.0 * (1.0 - alpha) - 6.0).to(device)
         t_ada = torch.tensor(1.0 - alpha).to(device)
@@ -636,7 +636,7 @@ def solve(config_name: str) -> None:
             optimizer.zero_grad()
             # torch.cuda.reset_peak_memory_stats()
             with torch.amp.autocast("cuda", dtype=data_type):
-                x_t = checkpoint(checkpointed_integrate, z)
+                x_t = checkpoint(checkpointed_integrate, temp_z)
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
                 decoded_output = torch.sin(vae.decode(x_t).sample)
 
@@ -647,6 +647,7 @@ def solve(config_name: str) -> None:
 
                 loss = criterion(operator_decoded_output, y_n)
                 # encoded = vae.encode(decoded_output).latent_dist.sample()
+                loss += gauss_prior_weight * (x_t, latent_y)
                 loss += vae_weight * (x_t**2 / 2).mean()
                 loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
                 # loss += lpips_weight * lpips_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0).mean()
@@ -674,7 +675,7 @@ def solve(config_name: str) -> None:
             optimizer_z.zero_grad()
             # torch.cuda.reset_peak_memory_stats()
             with torch.amp.autocast("cuda", dtype=data_type):
-                x_t = checkpoint(checkpointed_integrate, z)
+                x_t = checkpoint(checkpointed_integrate, temp_z)
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
                 decoded_output = torch.sin(vae.decode(x_t).sample)
 
@@ -705,7 +706,7 @@ def solve(config_name: str) -> None:
             optimizer_t.zero_grad()
             # torch.cuda.reset_peak_memory_stats()
             with torch.amp.autocast("cuda", dtype=data_type):
-                x_t = checkpoint(checkpointed_integrate, z)
+                x_t = checkpoint(checkpointed_integrate, temp_z)
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
                 decoded_output = torch.sin(vae.decode(x_t).sample)
 
@@ -757,7 +758,7 @@ def solve(config_name: str) -> None:
                 #     optimizer.add_param_group({'params': decoder_blocks[-1].parameters(), 'lr': lr_dec[block_to_unfreeze_idx]})
                 # else:
                 #     optimizer.param_groups[-1]['lr'] = lr_dec[block_to_unfreeze_idx]
-
+            temp_z = alpha * z + (1 - alpha) * latent_y
             if optimizer_select == "adam":
                 loss = optimizer.step(closure)
                 new_lr = lr_t_ada * (decay_factor ** iterator)

@@ -26,7 +26,7 @@ import lpips
 from fmplug.utils.measurements import get_noise, get_operator
 from fmplug.utils.tv_norm import tv_lp_loss
 from fmplug.utils.image_utils import Blurkernel, generate_tilt_map, mask_generator
-from fmplug.utils.var_es import VarianceEarlyStopping, MeanEarlyStopping
+from fmplug.utils.var_es import VarianceEarlyStopping
 import pandas as pd
 import cv2
 
@@ -39,7 +39,7 @@ scaler = torch.cuda.amp.GradScaler()
 
 # Global variables for wandb
 API_KEY = "bb47140c09574b488dcf0bc3d92f09d93b6241ce"
-PROJECT_NAME = "FMPlug-Ada-DGP-ES"
+PROJECT_NAME = "FMPlug-Ada-DGP-Full-ES"
 
 # Enable wandb
 print("Initialize Project ...")
@@ -56,8 +56,6 @@ def set_seed(seed):
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
-
-set_seed(123)  # Set a fixed seed for reproducibility
 
 def relative_l1_loss(pred, target, eps=1e-5):
     """
@@ -298,7 +296,8 @@ def solve(config_name: str) -> None:
     t_end = fmplug_config["t_end"]
     data_type = eval(fmplug_config["data_type"])
     optimizer_select = fmplug_config["optimizer_select"]
-    finetune_decoder_blocks_interval = fmplug_config.get("finetune_decoder_blocks_interval", 0) # Default to 0 (no incremental finetuning)
+    finetune_decoder_interval = fmplug_config.get("finetune_decoder_interval", 0) # Default to 0 (no incremental finetuning)
+
     
     es_window_size = fmplug_config["es_window_size"]
     es_patience = fmplug_config["es_patience"]
@@ -496,10 +495,7 @@ def solve(config_name: str) -> None:
             z = (z/vae.config.scaling_factor) + vae.config.shift_factor
             return vae.decode(z, return_dict=False)[0]
         
-        if optimizer_select == "adam":
-            early_stop_indicator = VarianceEarlyStopping(es_window_size, es_patience, es_min_epochs, es_delta)
-        elif optimizer_select == "lbfgs":
-            early_stop_indicator = MeanEarlyStopping(es_window_size, es_patience, es_min_epochs, es_delta)
+        early_stop_indicator = VarianceEarlyStopping(es_window_size, es_patience, es_min_epochs, es_delta)
 
         # initialize latent
         
@@ -590,31 +586,13 @@ def solve(config_name: str) -> None:
             params_group1 = {'params': z, 'lr': lr[0]}
             params_group2 = {'params': t_ada, 'lr': lr_t_ada}
             
-            # Get decoder blocks for incremental fine-tuning
-            decoder_blocks = list(vae.decoder.up_blocks) # Assuming decoder blocks are in vae.decoder.up_blocks
-            num_decoder_blocks = len(decoder_blocks)
-            
-            
-            # unfreeze_schedule = [
-            #                     vae.decoder.conv_in,
-            #                     vae.decoder.mid_block,
-            #                     vae.decoder.up_blocks[0],
-            #                     vae.decoder.up_blocks[1],
-            #                     vae.decoder.up_blocks[2],
-            #                     vae.decoder.up_blocks[3],
-            #                     vae.decoder.conv_norm_out,
-            #                     vae.decoder.conv_act,
-            #                     vae.decoder.conv_out,
-            #                 ]
-
-            
             # Initialize optimizer with z and t_ada, no decoder params initially
             optimizer = torch.optim.AdamW([params_group1, params_group2])
             
 
         elif optimizer_select == "lbfgs":
-            optimizer_z = torch.optim.LBFGS([z], lr=lr[0], max_iter=20, history_size=20, line_search_fn="strong_wolfe")
-            optimizer_t = torch.optim.LBFGS([t_ada], lr=lr_t_ada, max_iter=20, history_size=20, line_search_fn="strong_wolfe")
+            optimizer_z = torch.optim.LBFGS([z], lr=lr, max_iter=50, history_size=50, line_search_fn="strong_wolfe")
+            optimizer_t = torch.optim.LBFGS([t_ada], lr=lr_t_ada, max_iter=50, history_size=50, line_search_fn="strong_wolfe")
         
 
         psnrs = []
@@ -733,32 +711,23 @@ def solve(config_name: str) -> None:
         # total_start_time = time.time()
 
         for iterator in tqdm.tqdm(range(epochs)):
-            iter_start_time = time.time()
-            # Incremental fine-tuning of VAE decoder blocks
-            # if finetune_decoder_blocks_interval > 0 and iterator % finetune_decoder_blocks_interval == 0 and iterator < finetune_decoder_blocks_interval * num_decoder_blocks:
-            if finetune_decoder_blocks_interval > 0 and iterator > 0 and iterator % finetune_decoder_blocks_interval == 0 and iterator < finetune_decoder_blocks_interval * len(lr_dec):
-                block_to_unfreeze_idx = iterator // finetune_decoder_blocks_interval - 1
-                if block_to_unfreeze_idx < num_decoder_blocks:
-                    if lr_dec[block_to_unfreeze_idx] != 0.0:
-                        for param in decoder_blocks[block_to_unfreeze_idx].resnets.parameters():
-                            param.requires_grad_(True)
-                        print(f"Unfreezing decoder block {block_to_unfreeze_idx} to optimizer with learning rate {lr_dec[block_to_unfreeze_idx]}")
-                        optimizer.add_param_group({'params': decoder_blocks[block_to_unfreeze_idx].resnets.parameters(), 'lr': lr_dec[block_to_unfreeze_idx]})
+            if finetune_decoder_interval > 0 and iterator > 0 and iterator % finetune_decoder_interval == 0 and iterator < finetune_decoder_interval * len(lr_dec):
+                lr_dec_idx = iterator // finetune_decoder_interval - 1
+                if lr_dec_idx == 0:
+                    params_to_optimize = []
+                    for block in [vae.decoder.conv_out, vae.decoder.conv_norm_out, vae.decoder.conv_act, vae.decoder.mid_block]: #, vae.decoder.up_blocks[-1].resnets
+                        params_to_optimize += list(block.parameters())
+                    optimizer.add_param_group({'params': params_to_optimize, 'lr': lr_dec[lr_dec_idx]})
+                    print(f"Unfreezing decoder to optimizer with learning rate {lr_dec[lr_dec_idx]}")
                         
-                    # optimizer.param_groups[0]['lr'] = lr[block_to_unfreeze_idx]
-                    optimizer.param_groups[0]['lr'] = lr[block_to_unfreeze_idx+1]
-                    # for param_group_idx in range(1, block_to_unfreeze_idx + 1):
-                    #     # Update the learning rate for previously added decoder blocks
-                    #     if optimizer.param_groups[-param_group_idx]['lr'] != 0.0:
-                    #         optimizer.param_groups[-param_group_idx]['lr'] = lr_dec[block_to_unfreeze_idx]
-                # if block_to_unfreeze_idx == 0:
-                #     for param in decoder_blocks[-1].parameters():
-                #         param.requires_grad_(True)
-                #     optimizer.add_param_group({'params': decoder_blocks[-1].parameters(), 'lr': lr_dec[block_to_unfreeze_idx]})
-                # else:
-                #     optimizer.param_groups[-1]['lr'] = lr_dec[block_to_unfreeze_idx]
+                optimizer.param_groups[0]['lr'] = lr[lr_dec_idx+1]
+                optimizer.param_groups[-1]['lr'] = lr_dec[lr_dec_idx]
+                print(f"update latent learning rate {lr[lr_dec_idx+1]} decoder learning rate {lr_dec[lr_dec_idx]}")
+                
+
 
             if optimizer_select == "adam":
+
                 loss = optimizer.step(closure)
                 new_lr = lr_t_ada * (decay_factor ** iterator)
                 optimizer.param_groups[1]['lr'] = new_lr
@@ -781,7 +750,7 @@ def solve(config_name: str) -> None:
             # print("Opt Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
             # print("Opt Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB")
             torch.cuda.empty_cache()
-            iter_time = time.time() - iter_start_time
+            # iter_time = time.time() - iter_start_time
             # print(f"Iter Time = {iter_time:.4f} sec")
             
             # Evaluate
@@ -811,8 +780,7 @@ def solve(config_name: str) -> None:
                     "mse_loss": mse_score,
                     "z_grad_norms": grad_norm,
                     "z_deltas": delta,
-                    "z_rel_updates": rel_update.item(),
-                    "iter_time": iter_time,
+                    "z_rel_updates": rel_update.item()
                 }
                 wandb.log(metrics_to_log)  # type: ignore
 
@@ -832,10 +800,7 @@ def solve(config_name: str) -> None:
                     df_new.to_csv(log_path, mode='w', header=True, index=False)
                 
                 if early_stop_indicator.get_flag() == False:
-                    if optimizer_select == "adam":
-                        early_stop_indicator.update(loss.item() / loss_multiplier, output_numpy)
-                    elif optimizer_select == "lbfgs":
-                        early_stop_indicator.update(rel_update.item(), output_numpy)
+                    early_stop_indicator.update(loss.item() / loss_multiplier, output_numpy)
                 else:
                     # min_index = min(range(len(early_stop_indicator.get_losses())), key=lambda i: losses[i])
                     min_index = es_window_size - es_patience - 1

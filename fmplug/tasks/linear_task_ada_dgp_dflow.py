@@ -22,8 +22,6 @@ from torchvision import transforms
 import pickle
 # first party
 from fmplug.losses.losses import PerceptualLossV3
-import torch.nn as nn
-import torch.nn.functional as F
 import lpips
 from fmplug.utils.measurements import get_noise, get_operator
 from fmplug.utils.tv_norm import tv_lp_loss
@@ -59,6 +57,27 @@ def set_seed(seed):
     np.random.seed(seed)
     random.seed(seed)
 
+set_seed(123)  # Set a fixed seed for reproducibility
+
+def relative_l1_loss(pred, target, eps=1e-5):
+    """
+    Relative L1 loss that reduces the influence of high absolute values.
+
+    Args:
+        pred: Predicted image tensor, shape (N, C, H, W)
+        target: Ground truth image tensor, shape (N, C, H, W)
+        eps: Small constant to avoid division by zero
+
+    Returns:
+        Scalar loss
+    """
+    diff = torch.abs(pred - target)
+    denom = torch.abs(target) + eps
+    relative_error = diff / denom
+    return relative_error.mean()
+
+def hybrid_loss(pred, target, alpha=0.8):
+    return alpha * torch.nn.functional.mse_loss(pred, target) + (1 - alpha) * relative_l1_loss(pred, target)
 
 def save_png_cv2(array, path):
     # If array is CHW, convert to HWC
@@ -119,7 +138,6 @@ def normalize_latent(z_x: torch.Tensor, t_x: float):
     z_var = torch.tensor(z_var, dtype=z_x.dtype, device=z_x.device)
     z_x = torch.sqrt(z_var / torch.var(z_x, unbiased=False)) * z_x
     return z_x
-
 
 def integrate(
     f,
@@ -267,8 +285,9 @@ def solve(config_name: str) -> None:
     alpha = fmplug_config["alpha"]
     NFE = fmplug_config["NFE"]
     guidance_scale = fmplug_config["guidance_scale"]
-
-    lr_t_ada = fmplug_config["lr_t_ada"]
+    lr = fmplug_config["lr"]
+    lr_dec = fmplug_config["lr_dec"]
+    # lr_t_ada = fmplug_config["lr_t_ada"]
     decay_factor =  fmplug_config["decay_factor"]
     epochs = fmplug_config["epochs"]
     loss_multiplier = fmplug_config["loss_multiplier"]
@@ -280,11 +299,6 @@ def solve(config_name: str) -> None:
     data_type = eval(fmplug_config["data_type"])
     optimizer_select = fmplug_config["optimizer_select"]
     finetune_decoder_blocks_interval = fmplug_config.get("finetune_decoder_blocks_interval", 0) # Default to 0 (no incremental finetuning)
-    lr_z_phases = fmplug_config.get("lr_z_phases", [1E-2]) # Learning rates for z in different phases
-    lr_dec_phases = fmplug_config.get("lr_dec_phases", [1E-5]) # Learning rates for decoder in different phases
-    lr_phase_milestones = fmplug_config.get("lr_phase_milestones", [0])  # Milestones for learning rate changes
-    lora_scale = fmplug_config.get("lora_scale", 1.0)  # Scale for LoRA representation
-    lora_rank = fmplug_config.get("lora_rank", 16)  # Rank for LoRA representation
     
     es_window_size = fmplug_config["es_window_size"]
     es_patience = fmplug_config["es_patience"]
@@ -305,22 +319,21 @@ def solve(config_name: str) -> None:
             config={
                 "method": method,
                 "optimizer": optimizer_select,
-                "lr_t_ada": lr_t_ada,
+                "lr": lr,
+                "lr_dec": lr_dec,
+                # "lr_t_ada": lr_t_ada,
                 "decay_factor": decay_factor,
                 "epochs": epochs,
                 "loss_multiplier": loss_multiplier,
                 "image_size": image_size,
                 "NFE": NFE,
                 "guidance_scale": guidance_scale,
-                "alpha": alpha,
                 "loss_fn": loss_fn,
                 "vae_weight": vae_weight,
                 "lpips_weight": lpips_weight,
                 "TV_reg_weight": TV_reg_weight,
                 "t_end": t_end,
                 "data_type": data_type,
-                "lr_z_phases": lr_z_phases,
-                "lr_dec_phases": lr_dec_phases,
             },
         )
     
@@ -411,9 +424,8 @@ def solve(config_name: str) -> None:
         vae = pipe.vae
         vae.eval()
         vae.encoder.requires_grad_(False)
-        vae.decoder.requires_grad_(False)  # Freeze decoder initially
+        vae.decoder.requires_grad_(False) # Freeze decoder initially
         vae.enable_gradient_checkpointing()
-
 
         prompt_2 = None
         prompt_3 = None
@@ -430,6 +442,7 @@ def solve(config_name: str) -> None:
         clip_skip = None
         num_images_per_prompt = 1
         max_sequence_length = 256
+        lora_scale = None
 
         # encode prompt
         print("Encode prompt ...")
@@ -455,6 +468,7 @@ def solve(config_name: str) -> None:
                 clip_skip=clip_skip,
                 num_images_per_prompt=num_images_per_prompt,
                 max_sequence_length=max_sequence_length,
+                lora_scale=lora_scale,
             )
 
         # prompt embeds with classifier free guidance
@@ -482,85 +496,6 @@ def solve(config_name: str) -> None:
             z = (z/vae.config.scaling_factor) + vae.config.shift_factor
             return vae.decode(z, return_dict=False)[0]
         
-        # def forward_with_residual(decoder, latent, residual, temb=None):
-        #     """
-        #     Performs a forward pass on the VAE decoder, adding a residual
-        #     tensor and correctly passing the time embedding argument.
-
-        #     Args:
-        #         decoder: The VAE decoder model.
-        #         latent (torch.Tensor): The input latent tensor.
-        #         residual (torch.Tensor): The residual tensor to add.
-        #         temb (torch.Tensor, optional): The time embedding. Defaults to None.
-        #     """
-        #     # 1. Initial convolution
-        #     sample = decoder.conv_in(latent)
-
-        #     # 2. Middle block
-        #     sample = decoder.mid_block(sample, temb=temb)
-
-        #     # 3. First two upsampling blocks
-        #     # Note: The UpDecoderBlock2D itself handles passing `temb` to its ResNets
-        #     sample = decoder.up_blocks[0](sample, temb=temb)
-        #     sample = decoder.up_blocks[1](sample, temb=temb)
-
-        #     # 4. Third upsampling block (up_blocks[2]) - INJECTION POINT
-        #     hidden_states = sample
-        #     # Apply ResNets, passing temb
-        #     for resnet in decoder.up_blocks[2].resnets:
-        #         hidden_states = resnet(hidden_states, temb=temb)
-            
-        #     # Apply Upsampler
-        #     for upsampler in decoder.up_blocks[2].upsamplers:
-        #         hidden_states = upsampler(hidden_states)
-        #     sample = hidden_states + residual
-
-        #     # 5. Final upsampling block (up_blocks[3])
-        #     for resnet in decoder.up_blocks[3].resnets:
-        #         sample = resnet(sample, temb=temb)
-
-        #     # 6. Final output convolutions
-        #     sample = decoder.conv_norm_out(sample)
-        #     sample = decoder.conv_act(sample)
-        #     sample = decoder.conv_out(sample)
-
-        #     return sample
-        
-        def forward_with_residual(decoder, latent, residual):
-            """
-            Decode latent with a residual added before the final UpDecoderBlock2D (decoder.up_blocks[3]).
-            
-            Args:
-                decoder: The VAE decoder module (AutoencoderKL.decoder)
-                latent: Input latent tensor (B, C=16, H, W)
-                residual: Residual tensor (must match shape after decoder.up_blocks[2])
-                
-            Returns:
-                Decoded image tensor (B, 3, H*factor, W*factor)
-            """
-            # Initial projection
-            hidden_states = decoder.conv_in(latent)
-
-            # Mid block
-            hidden_states = decoder.mid_block(hidden_states)
-
-            # Up block 0 to 2
-            for block in decoder.up_blocks[:3]:
-                hidden_states = block(hidden_states)
-
-            # Inject residual before the last up block
-            hidden_states = hidden_states + residual
-
-            # Final up block (index 3)
-            hidden_states = decoder.up_blocks[3](hidden_states)
-
-            # Output projection
-            hidden_states = decoder.conv_norm_out(hidden_states)
-            hidden_states = decoder.conv_act(hidden_states)
-            hidden_states = decoder.conv_out(hidden_states)
-
-            return hidden_states
-
         early_stop_indicator = VarianceEarlyStopping(es_window_size, es_patience, es_min_epochs, es_delta)
 
         # initialize latent
@@ -578,11 +513,12 @@ def solve(config_name: str) -> None:
         img = img.to(y_n.dtype)
         img = img.to(device)
         with torch.no_grad():
-            if "super_resolution" in task:
-                blur = transforms.GaussianBlur(kernel_size=7, sigma=1.0)
-                z = encode(blur(img))
-            else:
-                z = encode(img)
+            # if "super_resolution" in task:
+            #     blur = transforms.GaussianBlur(kernel_size=7, sigma=1.0)
+            #     z = encode(blur(img))
+            # else:
+            #     z = encode(img)
+            z = encode(img)
             z = np.sqrt(alpha) * z + np.sqrt(1 - alpha) * torch.randn_like(z)
             z = z.detach()
         
@@ -592,22 +528,9 @@ def solve(config_name: str) -> None:
         z = torch.nn.parameter.Parameter(z, True).to(device)
         z = z.requires_grad_(True)
         # t_ada = torch.tensor(12.0 * (1.0 - alpha) - 6.0).to(device)
-        t_ada = torch.tensor(1.0 - alpha).to(device)
-        t_ada = t_ada.requires_grad_(True)
-        
-        lora_A = torch.nn.Parameter(torch.zeros([1, 256, lora_rank, 512], device=device))
-        lora_B = torch.nn.Parameter(torch.zeros([1, 256, 512, lora_rank], device=device))
-        
-        print(lora_A.is_leaf)
-        print(lora_B.is_leaf)
-        
-        def lora_representation():
-            # x: (B, C, H, W)
-            # lora_A: (1, 256, lora_rank, 512)
-            # lora_B: (1, 256, 512, lora_rank)
-            lora_AB = torch.einsum('bcrw,bchr->bchw', lora_A, lora_B)
-            lora_AB = lora_AB / torch.sqrt(torch.norm(lora_AB, p=2) / lora_scale)
-            return lora_AB
+        t_ada = torch.tensor(-10.0).to(device)
+        # t_ada = torch.tensor(-1.0).to(device)
+        # t_ada = t_ada.requires_grad_(True)
 
         # amplitude = torch.tensor(torch.pi).to(dtype=data_type, device=device)
         
@@ -643,9 +566,12 @@ def solve(config_name: str) -> None:
         # Criterion for learning
         if loss_fn == "l1":
             criterion = torch.nn.L1Loss().to(device)
-
         elif loss_fn == "mse":
-            criterion = torch.nn.MSELoss().to(device)  # type: ignore
+            criterion = torch.nn.MSELoss().to(device)
+        elif loss_fn == "l1_rel":
+            criterion = relative_l1_loss
+        elif loss_fn == "hybrid":
+            criterion = hybrid_loss
 
         # Setup perceptual loss
         # percep_loss_fn = PerceptualLoss(layers=["relu1_2"]).to(device)
@@ -658,17 +584,35 @@ def solve(config_name: str) -> None:
         L2_tv = tv_lp_loss(pow = 2)
         
         if optimizer_select == "adam":
-            params_group1 = {'params': z, 'lr': lr_z_phases[0]}
-            params_group2 = {'params': t_ada, 'lr': lr_t_ada}
+            params_group1 = {'params': z, 'lr': lr[0]}
+            # params_group2 = {'params': t_ada, 'lr': lr_t_ada}
             
-            # Collect all LoRA parameters
-            lora_params = [lora_A, lora_B]
-
-            params_group3 = {'params': lora_params, 'lr': lr_dec_phases[0]} # Assuming initial lr for LoRA params
+            # Get decoder blocks for incremental fine-tuning
+            decoder_blocks = list(vae.decoder.up_blocks) # Assuming decoder blocks are in vae.decoder.up_blocks
+            num_decoder_blocks = len(decoder_blocks)
             
-            # Initialize optimizer with z, t_ada, and LoRA parameters
-            optimizer = torch.optim.AdamW([params_group1, params_group2, params_group3])
+            
+            # unfreeze_schedule = [
+            #                     vae.decoder.conv_in,
+            #                     vae.decoder.mid_block,
+            #                     vae.decoder.up_blocks[0],
+            #                     vae.decoder.up_blocks[1],
+            #                     vae.decoder.up_blocks[2],
+            #                     vae.decoder.up_blocks[3],
+            #                     vae.decoder.conv_norm_out,
+            #                     vae.decoder.conv_act,
+            #                     vae.decoder.conv_out,
+            #                 ]
 
+            
+            # Initialize optimizer with z and t_ada, no decoder params initially
+            optimizer = torch.optim.AdamW([params_group1])
+            
+
+        elif optimizer_select == "lbfgs":
+            optimizer_z = torch.optim.LBFGS([z], lr=lr[0], max_iter=20, history_size=20, line_search_fn="strong_wolfe")
+            # optimizer_t = torch.optim.LBFGS([t_ada], lr=lr_t_ada, max_iter=50, history_size=50, line_search_fn="strong_wolfe")
+        
 
         psnrs = []
         losses = []
@@ -691,7 +635,7 @@ def solve(config_name: str) -> None:
             with torch.amp.autocast("cuda", dtype=data_type):
                 x_t = checkpoint(checkpointed_integrate, z)
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
-                decoded_output = torch.sin(forward_with_residual(vae.decoder, x_t, lora_representation()))
+                decoded_output = torch.sin(vae.decode(x_t).sample)
 
                 if measure_config['operator']['name'] == 'inpainting':
                     operator_decoded_output = operator.forward(decoded_output, mask=mask)
@@ -700,7 +644,7 @@ def solve(config_name: str) -> None:
 
                 loss = criterion(operator_decoded_output, y_n)
                 # encoded = vae.encode(decoded_output).latent_dist.sample()
-                loss += vae_weight * (x_t**2 / 2).mean()
+                loss += vae_weight * (z**2 / 2).mean()
                 loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
                 # loss += lpips_weight * lpips_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0).mean()
                 loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
@@ -709,27 +653,115 @@ def solve(config_name: str) -> None:
             loss = loss.float()
             # scaler.scale(loss).backward()
             loss.backward()
+            # Report peak memory used in MB
+            # peak_memory = torch.cuda.max_memory_allocated() / 1024**2
+            # print(f"Peak GPU memory used: {peak_memory:.2f} MB")
+            # print("gradient z: ", z.grad.min(), z.grad.max())
+            
+            # During training loop:
+            
+
+            # Backward + optimizer.step()
+
             return loss
 
-        
+
+        def closure_z():
+            nonlocal decoded_output
+            optimizer_z.zero_grad()
+            # torch.cuda.reset_peak_memory_stats()
+            with torch.amp.autocast("cuda", dtype=data_type):
+                x_t = checkpoint(checkpointed_integrate, z)
+                x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
+                decoded_output = torch.sin(vae.decode(x_t).sample)
+
+                if measure_config['operator']['name'] == 'inpainting':
+                    operator_decoded_output = operator.forward(decoded_output, mask=mask)
+                else:
+                    operator_decoded_output = operator.forward(decoded_output)
+
+                loss = criterion(operator_decoded_output, y_n)
+                # encoded = vae.encode(decoded_output).latent_dist.sample()
+                loss += vae_weight * (z**2 / 2).mean()
+                loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
+                loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
+                loss *= loss_multiplier
+            
+            loss = loss.float()
+            scaler.scale(loss).backward()
+            # Report peak memory used in MB
+            # peak_memory = torch.cuda.max_memory_allocated() / 1024**2
+            # print(f"Peak GPU memory used: {peak_memory:.2f} MB")
+            # print("gradient z: ", z.grad.min(), z.grad.max())
+
+            return loss
+
+
+        def closure_t():
+            nonlocal decoded_output
+            # optimizer_t.zero_grad()
+            # torch.cuda.reset_peak_memory_stats()
+            with torch.amp.autocast("cuda", dtype=data_type):
+                x_t = checkpoint(checkpointed_integrate, z)
+                x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
+                decoded_output = torch.sin(vae.decode(x_t).sample)
+
+                if measure_config['operator']['name'] == 'inpainting':
+                    operator_decoded_output = operator.forward(decoded_output, mask=mask)
+                else:
+                    operator_decoded_output = operator.forward(decoded_output)
+
+                loss = criterion(operator_decoded_output, y_n)
+                encoded = vae.encode(decoded_output).latent_dist.sample()
+                loss += vae_weight * criterion(x_t, encoded)
+                loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
+                loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
+                loss *= loss_multiplier
+            
+            loss = loss.float()
+            scaler.scale(loss).backward()
+            # Report peak memory used in MB
+            # peak_memory = torch.cuda.max_memory_allocated() / 1024**2
+            # print(f"Peak GPU memory used: {peak_memory:.2f} MB")
+            # print("gradient z: ", z.grad.min(), z.grad.max())
+
+            return loss
+
+        # total_start_time = time.time()
+
         for iterator in tqdm.tqdm(range(epochs)):
+            iter_start_time = time.time()
+            # Incremental fine-tuning of VAE decoder blocks
+            # if finetune_decoder_blocks_interval > 0 and iterator % finetune_decoder_blocks_interval == 0 and iterator < finetune_decoder_blocks_interval * num_decoder_blocks:
+            if finetune_decoder_blocks_interval > 0 and iterator > 0 and iterator % finetune_decoder_blocks_interval == 0 and iterator < finetune_decoder_blocks_interval * len(lr_dec):
+                block_to_unfreeze_idx = iterator // finetune_decoder_blocks_interval - 1
+                if block_to_unfreeze_idx < num_decoder_blocks:
+                    if lr_dec[block_to_unfreeze_idx] != 0.0:
+                        for param in decoder_blocks[block_to_unfreeze_idx].resnets.parameters():
+                            param.requires_grad_(True)
+                        print(f"Unfreezing decoder block {block_to_unfreeze_idx} to optimizer with learning rate {lr_dec[block_to_unfreeze_idx]}")
+                        optimizer.add_param_group({'params': decoder_blocks[block_to_unfreeze_idx].resnets.parameters(), 'lr': lr_dec[block_to_unfreeze_idx]})
+                        
+                    # optimizer.param_groups[0]['lr'] = lr[block_to_unfreeze_idx]
+                    optimizer.param_groups[0]['lr'] = lr[block_to_unfreeze_idx+1]
+                    # for param_group_idx in range(1, block_to_unfreeze_idx + 1):
+                    #     # Update the learning rate for previously added decoder blocks
+                    #     if optimizer.param_groups[-param_group_idx]['lr'] != 0.0:
+                    #         optimizer.param_groups[-param_group_idx]['lr'] = lr_dec[block_to_unfreeze_idx]
+                # if block_to_unfreeze_idx == 0:
+                #     for param in decoder_blocks[-1].parameters():
+                #         param.requires_grad_(True)
+                #     optimizer.add_param_group({'params': decoder_blocks[-1].parameters(), 'lr': lr_dec[block_to_unfreeze_idx]})
+                # else:
+                #     optimizer.param_groups[-1]['lr'] = lr_dec[block_to_unfreeze_idx]
 
             if optimizer_select == "adam":
-                # Adjust learning rates based on phases
-                for i, milestone in enumerate(lr_phase_milestones):
-                    if iterator == milestone:
-                        if i < len(lr_z_phases):
-                            optimizer.param_groups[0]['lr'] = lr_z_phases[i] # Update lr for z
-                            print(f"Updated lr for z to {lr_z_phases[i]} at iteration {iterator}")
-                        if i < len(lr_dec_phases):
-                            # Update lr for LoRA parameters
-                            optimizer.param_groups[2]['lr'] = lr_dec_phases[i]
-                            print(f"Updated lr for LoRA parameters to {lr_dec_phases[i]} at iteration {iterator}")
-
                 loss = optimizer.step(closure)
-                new_lr = lr_t_ada * (decay_factor ** iterator)
-                optimizer.param_groups[1]['lr'] = new_lr
-           
+                # new_lr = lr_t_ada * (decay_factor ** iterator)
+                # optimizer.param_groups[1]['lr'] = new_lr
+            elif optimizer_select == "lbfgs":
+                loss = optimizer_z.step(closure_z)
+                # loss = optimizer_t.step(closure_t)
                 
             grad_norm = z.grad.norm().item()
             delta = (z - z_prev).norm().item()
@@ -746,6 +778,8 @@ def solve(config_name: str) -> None:
             # print("Opt Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
             # print("Opt Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB")
             torch.cuda.empty_cache()
+            iter_time = time.time() - iter_start_time
+            # print(f"Iter Time = {iter_time:.4f} sec")
             
             # Evaluate
             with torch.no_grad():
@@ -774,7 +808,8 @@ def solve(config_name: str) -> None:
                     "mse_loss": mse_score,
                     "z_grad_norms": grad_norm,
                     "z_deltas": delta,
-                    "z_rel_updates": rel_update.item()
+                    "z_rel_updates": rel_update.item(),
+                    "iter_time": iter_time,
                 }
                 wandb.log(metrics_to_log)  # type: ignore
 
@@ -806,7 +841,8 @@ def solve(config_name: str) -> None:
                     save_png_cv2(es_image, os.path.join(save_dir, rel_dir, f"reconstruction_es_{str(iterator-es_window_size+min_index)}.png"))
                     break
 
-
+        # total_time = time.time() - total_start_time
+        # print(f"\nTotal optimization time: {total_time:.2f} sec")
         visualize_image(ref_numpy, y_n_numpy, best_img, os.path.join(save_dir, rel_dir, f"img_diff_best.png"))
         visualize_image(ref_numpy, y_n_numpy, output_numpy, os.path.join(save_dir, rel_dir, f"img_diff_last.png"))
         
@@ -829,48 +865,3 @@ def solve(config_name: str) -> None:
         config_filename = os.path.join(save_dir, rel_dir, "config.yaml")
         with open(config_filename, "w") as file:
             yaml.safe_dump(config_all, file, default_flow_style=False)
-
-class LoRALinear(nn.Module):
-    def __init__(self, linear_layer, rank: int, alpha: float):
-        super().__init__()
-        self.linear = linear_layer
-        self.rank = rank
-        self.alpha = alpha
-        self.scaling = self.alpha / self.rank
-
-        self.lora_A = nn.Parameter(torch.randn(linear_layer.in_features, rank))
-        self.lora_B = nn.Parameter(torch.randn(rank, linear_layer.out_features))
-
-        # Initialize LoRA weights
-        nn.init.kaiming_uniform_(self.lora_A, a=5**0.5)
-        nn.init.zeros_(self.lora_B)
-
-    def forward(self, x):
-        original_output = self.linear(x)
-        lora_output = (x @ self.lora_A @ self.lora_B) * self.scaling
-        return original_output + lora_output
-
-class LoRAConv2d(nn.Module):
-    def __init__(self, conv_layer, rank: int, alpha: float):
-        super().__init__()
-        self.conv = conv_layer
-        self.rank = rank
-        self.alpha = alpha
-        self.scaling = self.alpha / self.rank
-
-        # For Conv2d, LoRA matrices are typically 1x1 convolutions
-        # A: (in_channels, rank, 1, 1)
-        # B: (rank, out_channels, 1, 1) - this is conceptually, but in practice,
-        # we apply B after A, so B's in_channels is rank and out_channels is conv_layer.out_channels
-        self.lora_A = nn.Parameter(torch.randn(conv_layer.in_channels, rank, 1, 1))
-        self.lora_B = nn.Parameter(torch.randn(rank, conv_layer.out_channels, 1, 1))
-
-        # Initialize LoRA weights
-        nn.init.kaiming_uniform_(self.lora_A, a=5**0.5)
-        nn.init.zeros_(self.lora_B)
-
-    def forward(self, x):
-        original_output = self.conv(x)
-        # Apply LoRA A and B as 1x1 convolutions
-        lora_output = F.conv2d(F.conv2d(x, self.lora_A), self.lora_B) * self.scaling
-        return original_output + lora_output

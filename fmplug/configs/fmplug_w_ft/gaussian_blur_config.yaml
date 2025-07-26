@@ -3,19 +3,18 @@ measurement:
     name: gaussian
     sigma: 0.03
   operator:
-    name: motion_blur
-    kernel_size: 65
-    intensity: 0.5
-  kernel_opt: 
-    kernel: motion
-    kernel_size: 65
-    intensity: 0.5
+    name: gaussian_blur
+    kernel_size: 61
+    intensity: 3.0
+  kernel_opt:
+    kernel: gaussian
+    kernel_size: 61
+    intensity: 3.0
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024/"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-DGP"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-FMPlug-W-FT"
   img_size: 512
-  scale_factor: 4
 
   method: "heun2"
   alpha: 0.5
@@ -39,8 +38,9 @@ fmplug:
   optimizer_select: "adam"
   
   es_window_size: 50
-  es_patience: 25
-  es_min_epochs: 300
-  es_delta: 0.000001
+  es_patience: 50
+  es_min_epochs: 500
+  es_delta: 0.0000005
 
-  finetune_decoder_blocks_interval: 100
+
+  finetune_decoder_blocks_interval: 150
