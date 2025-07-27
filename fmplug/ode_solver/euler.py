@@ -5,6 +5,19 @@ from typing import Callable
 import torch
 
 
+def spherical_projection(
+    x: torch.Tensor, center: torch.Tensor, radius: float
+) -> torch.Tensor:
+    direction = x - center
+    direction_norm = torch.norm(
+        direction.view(direction.size(0), -1), dim=1, keepdim=True
+    )
+    direction_unit = direction / (
+        direction_norm.view(-1, *([1] * (x.dim() - 1))) + 1e-8
+    )
+    return center + radius * direction_unit
+
+
 def integrate_euler_v2(
     f: Callable,
     x0: torch.Tensor,
@@ -42,6 +55,10 @@ def integrate_euler_v2(
             prompt_embeds=prompt_embeds,
             pooled_prompt_embeds=pooled_prompt_embeds,
         )
+        # print("noise pred tensor")
+        # print(noise_pred.min())
+        # print(noise_pred.max())
+        # print("\n")
 
         # If the classifier free guidance flag is True then we want
         # a linear combination of the unconditional noise prediction and
@@ -51,9 +68,28 @@ def integrate_euler_v2(
             noise_pred = noise_pred_uncond + guidance_scale * (
                 noise_pred_text - noise_pred_uncond
             )
+        # print("noise pred tensor - after")
+        # print(noise_pred.min())
+        # print(noise_pred.max())
+        # print("\n")
 
         # Update step for Euler
         prev_sample = x0 + dt * noise_pred
         x0 = prev_sample
+        # print("prev sample tensor")
+        # print(x0.min())
+        # print(x0.max())
+
+        # # Optional: estimate the denoised mean (if you have access)
+        # # For now, assume mu_theta ≈ x0
+        # # (could also use x0 - sigma * noise_pred if needed)
+        # mu_theta = x0
+
+        # # Compute spherical projection radius: sqrt(n) * sigma
+        # latent_dim = x0[0].numel()  # total elements per sample (e.g., C*H*W)
+        # radius = (latent_dim**0.5) * sigma.item()
+
+        # # Project back to Gaussian shell
+        # x0 = spherical_projection(prev_sample, center=mu_theta, radius=radius)
 
     return x0
