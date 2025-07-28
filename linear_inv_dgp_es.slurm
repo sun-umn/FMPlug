@@ -1,33 +1,42 @@
 #!/bin/bash -l
-#SBATCH --time=96:00:00
+#SBATCH --time=24:00:00
 #SBATCH --ntasks-per-node=8
 #SBATCH --mem=32g
 #SBATCH --tmp=32g
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=wan01530@umn.edu
-#SBATCH -p apollo_agate
+#SBATCH -p msigpu
 #SBATCH --gres=gpu:a100:1
-#SBATCH --account=jusun
+#SBATCH --account=qzhe
 export PATH=/users/9/wan01530/miniconda3/envs/py311/bin:$PATH
 echo $PATH
 nvidia-smi
 eval "$(conda shell.bash hook)"
 conda activate py311
 
+# python -m cli_dip run-FMPlug-task --config_name="DIP/superresolution_config"
+# python -m cli_dip run-FMPlug-task --config_name="DIP/gaussian_blur_config"
+
 # python -m cli_ada_dflow run-FMPlug-task --config_name="workshop/superresolution_config_d"
-python -m cli_ada_dflow run-FMPlug-task --config_name="workshop/gaussian_blur_config_d"
+# python -m cli_ada_dflow run-FMPlug-task --config_name="workshop/gaussian_blur_config_d"
 
-# python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/gaussian_blur_config_w"
-# python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/superresolution_config_w"
+# python -m cli_ada_dgp_reg run-FMPlug-task --config_name="workshop/superresolution_config_w_3_reg"
+# python -m cli_ada_dgp_reg run-FMPlug-task --config_name="workshop/gaussian_blur_config_w_3_reg"
+# python -m cli_ada_dgp_reg_hard run-FMPlug-task --config_name="workshop/superresolution_config_w_3_reg_hard"
+# python -m cli_ada_dgp_reg_hard run-FMPlug-task --config_name="workshop/gaussian_blur_config_w_3_reg_hard"
 
-# python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/gaussian_blur_config_d_noiseless"
+# python -m cli_ada_dgp_reg_hard_2 run-FMPlug-task --config_name="workshop/gaussian_blur_config_w_3_reg_hard_2"
+# python -m cli_ada_dgp_reg_hard_2 run-FMPlug-task --config_name="workshop/superresolution_config_w_3_reg_hard_2"
+
+
+# python -m cli_ada_dflow run-FMPlug-task --config_name="workshop/gaussian_blur_config_d_noiseless"
 # python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/gaussian_blur_config_w_noiseless"
 
 # python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/gaussian_blur_config"
 # python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/superresolution_config"
 
-# python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/gaussian_blur_config_3"
-# python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/superresolution_config_3"
+# python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/gaussian_blur_config_w_3"
+python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/superresolution_config_w_3"
 
 # python -m cli run-super-resolution-task --config_name="super_resolution/config_ada_1"
 # python -m cli run-super-resolution-task --config_name="super_resolution/config_ada_2"

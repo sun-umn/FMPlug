@@ -59,6 +59,17 @@ def set_seed(seed):
 
 set_seed(123)  # Set a fixed seed for reproducibility
 
+def kl_gaussian(A, B, eps=1e-6):
+    mu_A = A.mean()
+    mu_B = B.mean()
+    var_A = A.var(unbiased=False) + eps
+    var_B = B.var(unbiased=False) + eps
+
+    kl = torch.log(var_B.sqrt() / var_A.sqrt()) \
+         + (var_A + (mu_A - mu_B).pow(2)) / (2 * var_B) - 0.5
+    return kl
+
+
 def relative_l1_loss(pred, target, eps=1e-5):
     """
     Relative L1 loss that reduces the influence of high absolute values.
@@ -166,7 +177,8 @@ def integrate(
 
     for i in range(NFE):
         
-        latent_model_input = torch.cat([zt] * 2) if do_classifier_free_guidance else zt
+        # latent_model_input = torch.cat([zt] * 2) if do_classifier_free_guidance else zt
+        latent_model_input = zt
         time_step = temp_t.expand(latent_model_input.shape[0])
         time_step_next = temp_t_next.expand(latent_model_input.shape[0])
         if method == 'euler':
@@ -516,18 +528,16 @@ def solve(config_name: str) -> None:
         img = img.to(y_n.dtype)
         img = img.to(device)
         with torch.no_grad():
-            # if "super_resolution" in task:
-            #     blur = transforms.GaussianBlur(kernel_size=7, sigma=1.0)
-            #     z = encode(blur(img))
-            # else:
-            #     z = encode(img)
+            if "super_resolution" in task:
+                blur = transforms.GaussianBlur(kernel_size=7, sigma=1.0)
+                z = encode(blur(img))
+            else:
+                z = encode(img)
             z = encode(img)
-            z = np.sqrt(alpha) * z + np.sqrt(1 - alpha) * torch.randn_like(z)
+            z = alpha * z + (1 - alpha) * torch.randn_like(z)
             z = z.detach()
-        
         del img
-
-            
+   
         z = torch.nn.parameter.Parameter(z, True).to(device)
         z = z.requires_grad_(True)
         # t_ada = torch.tensor(12.0 * (1.0 - alpha) - 6.0).to(device)
@@ -645,9 +655,11 @@ def solve(config_name: str) -> None:
                 else:
                     operator_decoded_output = operator.forward(decoded_output)
 
+                operator_decoded_output = torch.clamp(operator_decoded_output, -1, 1)
                 loss = criterion(operator_decoded_output, y_n)
-                # encoded = vae.encode(decoded_output).latent_dist.sample()
-                loss += vae_weight * (x_t**2 / 2).mean()
+                # loss = criterion(decoded_output, ref_img)
+                encoded = vae.encode(decoded_output).latent_dist.sample()
+                loss += vae_weight * criterion(x_t, encoded)
                 loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
                 # loss += lpips_weight * lpips_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0).mean()
                 loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
@@ -683,6 +695,8 @@ def solve(config_name: str) -> None:
                 else:
                     operator_decoded_output = operator.forward(decoded_output)
 
+                operator_decoded_output = torch.clamp(operator_decoded_output, -1, 1)
+                # loss = criterion(decoded_output, ref_img)
                 loss = criterion(operator_decoded_output, y_n)
                 encoded = vae.encode(decoded_output).latent_dist.sample()
                 loss += vae_weight * criterion(x_t, encoded)
@@ -691,7 +705,9 @@ def solve(config_name: str) -> None:
                 loss *= loss_multiplier
             
             loss = loss.float()
-            scaler.scale(loss).backward()
+            # scaler.scale(loss).backward()
+            loss.backward()
+            
             # Report peak memory used in MB
             # peak_memory = torch.cuda.max_memory_allocated() / 1024**2
             # print(f"Peak GPU memory used: {peak_memory:.2f} MB")
@@ -713,10 +729,13 @@ def solve(config_name: str) -> None:
                     operator_decoded_output = operator.forward(decoded_output, mask=mask)
                 else:
                     operator_decoded_output = operator.forward(decoded_output)
-
+                    
+                operator_decoded_output = torch.clamp(operator_decoded_output, -1, 1)
                 loss = criterion(operator_decoded_output, y_n)
+                # loss = criterion(decoded_output, ref_img)
                 encoded = vae.encode(decoded_output).latent_dist.sample()
-                loss += vae_weight * criterion(x_t, encoded)
+                # loss += vae_weight * criterion(x_t, encoded)
+                loss += vae_weight * kl_gaussian(x_t, encoded)
                 loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
                 loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
                 loss *= loss_multiplier
@@ -757,11 +776,10 @@ def solve(config_name: str) -> None:
                 #     optimizer.add_param_group({'params': decoder_blocks[-1].parameters(), 'lr': lr_dec[block_to_unfreeze_idx]})
                 # else:
                 #     optimizer.param_groups[-1]['lr'] = lr_dec[block_to_unfreeze_idx]
-
             if optimizer_select == "adam":
                 loss = optimizer.step(closure)
-                new_lr = lr_t_ada * (decay_factor ** iterator)
-                optimizer.param_groups[1]['lr'] = new_lr
+                new_lr_t = lr_t_ada * (decay_factor ** iterator)
+                optimizer.param_groups[1]['lr'] = new_lr_t
             elif optimizer_select == "lbfgs":
                 _ = optimizer_z.step(closure_z)
                 loss = optimizer_t.step(closure_t)

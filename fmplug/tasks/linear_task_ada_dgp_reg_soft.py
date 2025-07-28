@@ -1,6 +1,7 @@
 # stdlib
 import glob
 import inspect
+import math
 import os
 import random
 import time
@@ -78,6 +79,26 @@ def relative_l1_loss(pred, target, eps=1e-5):
 
 def hybrid_loss(pred, target, alpha=0.8):
     return alpha * torch.nn.functional.mse_loss(pred, target) + (1 - alpha) * relative_l1_loss(pred, target)
+
+
+def norm_regularization(z):
+    """
+    z: Tensor of shape (B, d) or (B, C, H, W) — latent tensor
+    Returns: scalar regularization loss
+    """
+    B = z.shape[0]
+    d = z[0].numel()  # dimensionality per sample
+
+    # Flatten each sample and compute L2 norm
+    z_flat = z.view(B, -1)
+    l2_norm = torch.norm(z_flat, dim=1)  # shape: (B,)
+
+    target_norm = torch.sqrt(torch.tensor(d, dtype=z.dtype, device=z.device))
+
+    # Squared difference from target norm
+    reg_loss = ((l2_norm - target_norm) ** 2).mean()
+    return reg_loss
+
 
 def save_png_cv2(array, path):
     # If array is CHW, convert to HWC
@@ -288,11 +309,12 @@ def solve(config_name: str) -> None:
     lr = fmplug_config["lr"]
     lr_dec = fmplug_config["lr_dec"]
     lr_t_ada = fmplug_config["lr_t_ada"]
+    lr_alpha_ada = fmplug_config["lr_alpha_ada"]
     decay_factor =  fmplug_config["decay_factor"]
     epochs = fmplug_config["epochs"]
     loss_multiplier = fmplug_config["loss_multiplier"]
     loss_fn = fmplug_config["loss_fn"]
-    vae_weight = fmplug_config["vae_weight"]
+    norm_weight = fmplug_config["norm_weight"]
     lpips_weight = fmplug_config["lpips_weight"]
     TV_reg_weight = fmplug_config["TV_reg_weight"]
     t_end = fmplug_config["t_end"]
@@ -329,7 +351,7 @@ def solve(config_name: str) -> None:
                 "NFE": NFE,
                 "guidance_scale": guidance_scale,
                 "loss_fn": loss_fn,
-                "vae_weight": vae_weight,
+                "norm_weight": norm_weight,
                 "lpips_weight": lpips_weight,
                 "TV_reg_weight": TV_reg_weight,
                 "t_end": t_end,
@@ -522,18 +544,25 @@ def solve(config_name: str) -> None:
             # else:
             #     z = encode(img)
             latent_y = encode(img)
-            latent_y = np.sqrt(alpha) * latent_y
             latent_y = latent_y.detach()
+            # latent_y = (latent_y / torch.norm(latent_y, p=2) * math.sqrt(latent_y.numel())).detach()
+            latent_y = latent_y.requires_grad_(False)
         
         del img
 
-            
+        
+        
+        z = torch.randn_like(latent_y)
+        # z = z / torch.norm(z, p=2) * math.sqrt(z.numel())
         z = torch.nn.parameter.Parameter(torch.randn_like(latent_y), True).to(device)
         z = z.requires_grad_(True)
         # t_ada = torch.tensor(12.0 * (1.0 - alpha) - 6.0).to(device)
         t_ada = torch.tensor(1.0 - alpha).to(device)
         # t_ada = torch.tensor(-1.0).to(device)
         t_ada = t_ada.requires_grad_(True)
+        
+        alpha_ada = torch.tensor(alpha).to(device)
+        alpha_ada = alpha_ada.requires_grad_(True)
 
         # amplitude = torch.tensor(torch.pi).to(dtype=data_type, device=device)
         
@@ -589,6 +618,7 @@ def solve(config_name: str) -> None:
         if optimizer_select == "adam":
             params_group1 = {'params': z, 'lr': lr[0]}
             params_group2 = {'params': t_ada, 'lr': lr_t_ada}
+            params_group3 = {'params': alpha_ada, 'lr': lr_alpha_ada}
             
             # Get decoder blocks for incremental fine-tuning
             decoder_blocks = list(vae.decoder.up_blocks) # Assuming decoder blocks are in vae.decoder.up_blocks
@@ -609,7 +639,7 @@ def solve(config_name: str) -> None:
 
             
             # Initialize optimizer with z and t_ada, no decoder params initially
-            optimizer = torch.optim.AdamW([params_group1, params_group2])
+            optimizer = torch.optim.AdamW([params_group1, params_group2, params_group3])
             
 
         elif optimizer_select == "lbfgs":
@@ -636,6 +666,8 @@ def solve(config_name: str) -> None:
             optimizer.zero_grad()
             # torch.cuda.reset_peak_memory_stats()
             with torch.amp.autocast("cuda", dtype=data_type):
+                temp_alpha = torch.sigmoid((alpha_ada-0.5)*6)
+                temp_z = torch.sqrt(1-temp_alpha) * z + torch.sqrt(temp_alpha) * latent_y
                 x_t = checkpoint(checkpointed_integrate, temp_z)
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
                 decoded_output = torch.sin(vae.decode(x_t).sample)
@@ -646,9 +678,8 @@ def solve(config_name: str) -> None:
                     operator_decoded_output = operator.forward(decoded_output)
 
                 loss = criterion(operator_decoded_output, y_n)
-                # encoded = vae.encode(decoded_output).latent_dist.sample()
-                loss += gauss_prior_weight * (x_t, latent_y)
-                loss += vae_weight * (x_t**2 / 2).mean()
+                encoded = vae.encode(decoded_output).latent_dist.sample()
+                loss += norm_weight * norm_regularization(temp_z)
                 loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
                 # loss += lpips_weight * lpips_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0).mean()
                 loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
@@ -675,6 +706,7 @@ def solve(config_name: str) -> None:
             optimizer_z.zero_grad()
             # torch.cuda.reset_peak_memory_stats()
             with torch.amp.autocast("cuda", dtype=data_type):
+                temp_z = alpha_ada * z + (1 - torch.sigmoid((alpha_ada-0.5)*6)) * latent_y
                 x_t = checkpoint(checkpointed_integrate, temp_z)
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
                 decoded_output = torch.sin(vae.decode(x_t).sample)
@@ -686,7 +718,7 @@ def solve(config_name: str) -> None:
 
                 loss = criterion(operator_decoded_output, y_n)
                 encoded = vae.encode(decoded_output).latent_dist.sample()
-                loss += vae_weight * criterion(x_t, encoded)
+                loss += norm_weight * criterion(x_t, encoded)
                 loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
                 loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
                 loss *= loss_multiplier
@@ -706,6 +738,7 @@ def solve(config_name: str) -> None:
             optimizer_t.zero_grad()
             # torch.cuda.reset_peak_memory_stats()
             with torch.amp.autocast("cuda", dtype=data_type):
+                temp_z = alpha_ada * z + (1 - torch.sigmoid((alpha_ada-0.5)*6)) * latent_y
                 x_t = checkpoint(checkpointed_integrate, temp_z)
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
                 decoded_output = torch.sin(vae.decode(x_t).sample)
@@ -717,7 +750,7 @@ def solve(config_name: str) -> None:
 
                 loss = criterion(operator_decoded_output, y_n)
                 encoded = vae.encode(decoded_output).latent_dist.sample()
-                loss += vae_weight * criterion(x_t, encoded)
+                loss += norm_weight * criterion(x_t, encoded)
                 loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
                 loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
                 loss *= loss_multiplier
@@ -758,7 +791,8 @@ def solve(config_name: str) -> None:
                 #     optimizer.add_param_group({'params': decoder_blocks[-1].parameters(), 'lr': lr_dec[block_to_unfreeze_idx]})
                 # else:
                 #     optimizer.param_groups[-1]['lr'] = lr_dec[block_to_unfreeze_idx]
-            temp_z = alpha * z + (1 - alpha) * latent_y
+            # with torch.no_grad():
+            #     temp_z.data = temp_z / torch.norm(temp_z, p=2) * math.sqrt(temp_z.numel())
             if optimizer_select == "adam":
                 loss = optimizer.step(closure)
                 new_lr = lr_t_ada * (decay_factor ** iterator)
@@ -776,7 +810,8 @@ def solve(config_name: str) -> None:
             z_rel_updates.append(rel_update.item())
             z_prev = z.clone().detach()
             # scheduler.step()
-
+            # with torch.no_grad():
+            #     z.data = z / torch.norm(z, p=2) * math.sqrt(z.numel())
             losses.append(loss.item())
             
             # print("Opt Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
@@ -806,12 +841,13 @@ def solve(config_name: str) -> None:
                 metrics_to_log = {
                     "epoch": iterator,
                     "t_ada": (1000 * torch.sigmoid(12.0 * t_ada - 6.0)).item(),
+                    "alpha_ada": (torch.sigmoid((alpha_ada-0.5)*6)).item(),
                     "loss": loss.item()/loss_multiplier,
                     "psnr": tmp_psnr,
                     "lpips": lpips_score.item(),
                     "mse_loss": mse_score,
-                    "z_grad_norms": grad_norm,
-                    "z_deltas": delta,
+                    # "z_grad_norms": grad_norm,
+                    # "z_deltas": delta,
                     "z_rel_updates": rel_update.item(),
                     "iter_time": iter_time,
                 }

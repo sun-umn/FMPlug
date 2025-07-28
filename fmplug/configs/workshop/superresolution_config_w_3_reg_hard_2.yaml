@@ -9,24 +9,25 @@ measurement:
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024_first25/"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-DGP-workshop-w-OTODE"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-DGP-workshop-w-reg-hard-2-test-OTODE"
   img_size: 512
 
   method: "heun2"
-  alpha: 0.75
+  alpha: 0.8
   t_end: 0.00
   NFE: 3
   batch_size: 1
   guidance_scale: 0.0
-  # lr: [0.1]
-  lr: [0.5]
+  # lr: [1.0, 0.5, 0.2, 0.1]
+  lr: [0.2, 0.1, 0.05, 0.02]
   lr_dec: []
   # lr_dec: [0.0002, 0.0001, 0.0]
-  lr_t_ada: 0.05
-  decay_factor: 0.98
+  lr_t_ada: 0.01
+  lr_alpha_ada: 0.005
+  decay_factor: 1.0
   epochs: 1000
   loss_multiplier: 1.0
-  vae_weight: 0.0001
+  vae_weight: 0.0
   lpips_weight: 0.0
   TV_reg_weight: 0.0
   loss_fn: "mse"
@@ -35,7 +36,7 @@ fmplug:
   
   es_window_size: 50
   es_patience: 25
-  es_min_epochs: 50
-  es_delta: 0.00000001
+  es_min_epochs: 100
+  es_delta: 0.0000001
 
   finetune_decoder_blocks_interval: 100
