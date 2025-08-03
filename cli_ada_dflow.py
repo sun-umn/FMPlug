@@ -2,7 +2,7 @@
 import click
 
 # first party
-from fmplug.tasks.linear_task_ada_dgp_dflow import solve
+from Project.FMPlug.fmplug.tasks.dflow import solve
 
 
 @click.group()

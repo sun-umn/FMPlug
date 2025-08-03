@@ -2,7 +2,7 @@
 import click
 
 # first party
-from fmplug.tasks.linear_task_ada import solve
+from fmplug.tasks.fmplug_w_r import solve
 
 
 @click.group()

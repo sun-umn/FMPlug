@@ -13,7 +13,7 @@ measurement:
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024_first25/"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-DGP-workshop-w-reg-hard-2-test-OTODE"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-DGP-workshop-w-reg-hard-2-test-OTODE-Aligned"
   img_size: 512
 
   method: "heun2"
