@@ -1,3 +1,19 @@
+"""
+This file implements the forward measurement plug-in (FMPlug) for image reconstruction
+and inverse problems using Stable Diffusion 3. It includes functions for:
+
+- Setting random seeds for reproducibility.
+- Defining various loss functions (relative L1, hybrid, KL regularization).
+- Image utility functions (saving PNGs, visualization, latent normalization).
+- An ODE integration function for the diffusion process.
+- The main `solve` function that orchestrates the entire reconstruction pipeline,
+  including loading configurations, setting up the Stable Diffusion 3 model,
+  running the optimization loop, and saving results.
+
+The script leverages PyTorch for tensor operations, Hugging Face Diffusers for
+the Stable Diffusion 3 model, and Wandb for experiment tracking.
+"""
+
 # stdlib
 import glob
 import inspect
@@ -40,15 +56,18 @@ scaler = torch.cuda.amp.GradScaler()
 
 # Global variables for wandb
 API_KEY = "bb47140c09574b488dcf0bc3d92f09d93b6241ce"
-PROJECT_NAME = "FMPlug-Ada-DGP-ES"
+PROJECT_NAME = "FMPlug-W-R"
 
 # Enable wandb
 print("Initialize Project ...")
 wandb.login(key=API_KEY)  # type: ignore
 
-def set_seed(seed):
+def set_seed(seed: int) -> None:
     """
-    Function to set the seed for the run
+    Sets the random seed for reproducibility across multiple libraries.
+
+    Args:
+        seed (int): The seed value to use for all random number generators.
     """
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
@@ -60,24 +79,37 @@ def set_seed(seed):
 
 set_seed(123)  # Set a fixed seed for reproducibility
 
-def relative_l1_loss(pred, target, eps=1e-5):
+def relative_l1_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     """
-    Relative L1 loss that reduces the influence of high absolute values.
+    Computes the relative L1 loss, which is less sensitive to large absolute
+    errors compared to standard L1 loss, especially useful for images with
+    varying intensity ranges.
 
     Args:
-        pred: Predicted image tensor, shape (N, C, H, W)
-        target: Ground truth image tensor, shape (N, C, H, W)
-        eps: Small constant to avoid division by zero
+        pred (torch.Tensor): The predicted tensor.
+        target (torch.Tensor): The ground truth tensor.
+        eps (float): A small constant added to the denominator to prevent division by zero.
 
     Returns:
-        Scalar loss
+        torch.Tensor: The scalar relative L1 loss.
     """
     diff = torch.abs(pred - target)
     denom = torch.abs(target) + eps
     relative_error = diff / denom
     return relative_error.mean()
 
-def hybrid_loss(pred, target, alpha=0.8):
+def hybrid_loss(pred: torch.Tensor, target: torch.Tensor, alpha: float = 0.8) -> torch.Tensor:
+    """
+    Computes a hybrid loss combining Mean Squared Error (MSE) and Relative L1 loss.
+
+    Args:
+        pred (torch.Tensor): Predicted tensor.
+        target (torch.Tensor): Ground truth tensor.
+        alpha (float): Weighting factor for MSE loss. (1 - alpha) is used for Relative L1 loss.
+
+    Returns:
+        torch.Tensor: The scalar hybrid loss.
+    """
     return alpha * torch.nn.functional.mse_loss(pred, target) + (1 - alpha) * relative_l1_loss(pred, target)
 
 
@@ -102,7 +134,16 @@ def kl_regularization(z):
     return kl
 
 
-def save_png_cv2(array, path):
+def save_png_cv2(array: np.ndarray, path: str) -> None:
+    """
+    Saves a NumPy array as a PNG image using OpenCV. Handles channel reordering
+    (CHW to HWC) and type conversion (float to uint8) if necessary.
+
+    Args:
+        array (np.ndarray): The input image array. Can be float (0-1) or uint8.
+                            Supports 1-channel (grayscale) or 3-channel (RGB/BGR).
+        path (str): The full path including filename where the image will be saved.
+    """
     # If array is CHW, convert to HWC
     if array.ndim == 3 and array.shape[0] in [1, 3]:
         array = np.transpose(array, (1, 2, 0))
@@ -118,7 +159,17 @@ def save_png_cv2(array, path):
 
     cv2.imwrite(path, array)
 
-def visualize_image(ref: np.array, y_n: np.array, output: np.array, save_file_name: str) -> None:
+def visualize_image(ref: np.ndarray, y_n: np.ndarray, output: np.ndarray, save_file_name: str) -> None:
+    """
+    Visualizes and saves a comparison of ground truth, corrupted, and reconstructed images,
+    along with a pixel-wise difference map.
+
+    Args:
+        ref (np.ndarray): Ground truth image (NumPy array).
+        y_n (np.ndarray): Corrupted input image (NumPy array).
+        output (np.ndarray): Reconstructed image (NumPy array).
+        save_file_name (str): Path to save the visualization.
+    """
     # Create a figure with 1 row, 3 columns
     fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(10, 10))
 
@@ -151,11 +202,17 @@ def visualize_image(ref: np.array, y_n: np.array, output: np.array, save_file_na
     )
     plt.close()
 
-def normalize_latent(z_x: torch.Tensor, t_x: float):
+def normalize_latent(z_x: torch.Tensor, t_x: torch.Tensor) -> torch.Tensor:
     """
-    Normalize z_x at time t_x using interpolated mean and variance per channel.
-    z_x: (B, C, H, W)
-    t_x: scalar (float or 0-dim tensor)
+    Normalizes a latent tensor `z_x` at a given time `t_x` using a pre-trained
+    regression model (`reg`) to estimate the target variance.
+
+    Args:
+        z_x (torch.Tensor): The latent tensor to normalize, expected shape (B, C, H, W).
+        t_x (torch.Tensor): The current time step, a scalar tensor.
+
+    Returns:
+        torch.Tensor: The normalized latent tensor.
     """
     z_var = reg(1000-t_x.detach().cpu().numpy())
     z_var = torch.tensor(z_var, dtype=z_x.dtype, device=z_x.device)
@@ -256,13 +313,29 @@ def integrate(
 
 
 def solve(config_name: str) -> None:
+    """
+    Solves an inverse problem using a diffusion model (Stable Diffusion 3)
+    with a forward measurement plug-in. This function orchestrates the entire
+    reconstruction pipeline, including:
+    1. Loading configuration parameters.
+    2. Setting up Wandb for experiment tracking.
+    3. Preparing ground truth and corrupted images.
+    4. Initializing and configuring the Stable Diffusion 3 model components (transformer, VAE).
+    5. Defining the ODE integration process.
+    6. Running an optimization loop to reconstruct the image.
+    7. Logging metrics and saving results (images, history, config).
+
+    Args:
+        config_name (str): The name of the YAML configuration file (without extension)
+                           located in `./fmplug/configs`.
+    """
 
     # Current memory usage by tensors (in MB)
     print("Init Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
     print("Init Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB")
 
     # Load in the configuration
-    base_config_path = "/home/jusun/wan01530/Project/FMPlug/fmplug/configs"
+    base_config_path = "./fmplug/configs"
     with open(os.path.join(base_config_path, config_name + ".yaml"), "r") as file:
         config_all = yaml.safe_load(file)
 
@@ -286,6 +359,7 @@ def solve(config_name: str) -> None:
     vae_weight = fmplug_config["vae_weight"]
     lpips_weight = fmplug_config["lpips_weight"]
     TV_reg_weight = fmplug_config["TV_reg_weight"]
+    is_gauss_reg = fmplug_config["is_gauss_reg"]
     t_end = fmplug_config["t_end"]
     data_type = eval(fmplug_config["data_type"])
     optimizer_select = fmplug_config["optimizer_select"]
@@ -312,7 +386,7 @@ def solve(config_name: str) -> None:
                 "optimizer": optimizer_select,
                 "lr": lr,
                 "lr_dec": lr_dec,
-                # "lr_t_ada": lr_t_ada,
+                "lr_alpha_ada": lr_alpha_ada,
                 "decay_factor": decay_factor,
                 "epochs": epochs,
                 "loss_multiplier": loss_multiplier,
@@ -338,13 +412,14 @@ def solve(config_name: str) -> None:
             with open(prompt_path, "r", encoding="utf-8") as f:
                 prompt = f.read().strip()
 
-            # Get relative path starting from `task`
-            rel_path = os.path.relpath(gt_path, start=data_folder)
-
-            rel_dir = os.path.dirname(rel_path)  # gives: task/some_folder/another_folder
-
         else:
             print(f"Warning: prompt.txt not found for {gt_path}")
+        
+        # Get relative path starting from `task`
+        rel_path = os.path.relpath(gt_path, start=data_folder)
+
+        rel_dir = os.path.dirname(rel_path)  # gives: task/some_folder/another_folder
+        
         prompt = ""
         gt_img = Image.open(gt_path).convert("RGB")
 
@@ -508,14 +583,8 @@ def solve(config_name: str) -> None:
         img = img.to(y_n.dtype)
         img = img.to(device)
         with torch.no_grad():
-            # if "super_resolution" in task:
-            #     blur = transforms.GaussianBlur(kernel_size=7, sigma=1.0)
-            #     z = encode(blur(img))
-            # else:
-            #     z = encode(img)
             latent_y = encode(img)
             latent_y = latent_y.detach()
-            # latent_y = (latent_y / torch.norm(latent_y, p=2) * math.sqrt(latent_y.numel())).detach()
             latent_y = latent_y.requires_grad_(False)
         
         del img
@@ -526,9 +595,6 @@ def solve(config_name: str) -> None:
         z = z / torch.norm(z, p=2) * math.sqrt(z.numel())
         z = torch.nn.parameter.Parameter(z, True).to(device)
         z = z.requires_grad_(True)
-        # t_ada = torch.tensor(12.0 * (1.0 - alpha) - 6.0).to(device)
-        # t_ada = torch.tensor(-1.0).to(device)
-        # t_ada = t_ada.requires_grad_(True)
         
         alpha_ada = torch.tensor(alpha).to(device)
         alpha_ada = alpha_ada.requires_grad_(True)
@@ -594,20 +660,6 @@ def solve(config_name: str) -> None:
             decoder_blocks = list(vae.decoder.up_blocks) # Assuming decoder blocks are in vae.decoder.up_blocks
             num_decoder_blocks = len(decoder_blocks)
             
-            
-            # unfreeze_schedule = [
-            #                     vae.decoder.conv_in,
-            #                     vae.decoder.mid_block,
-            #                     vae.decoder.up_blocks[0],
-            #                     vae.decoder.up_blocks[1],
-            #                     vae.decoder.up_blocks[2],
-            #                     vae.decoder.up_blocks[3],
-            #                     vae.decoder.conv_norm_out,
-            #                     vae.decoder.conv_act,
-            #                     vae.decoder.conv_out,
-            #                 ]
-
-            
             # Initialize optimizer with z and t_ada, no decoder params initially
             optimizer = torch.optim.AdamW([params_group1, params_group2])
             # t_ada = 1 - alpha_ada  # Initialize t_ada as 1 - alpha_ada
@@ -635,9 +687,6 @@ def solve(config_name: str) -> None:
             with torch.amp.autocast("cuda", dtype=data_type):
                 temp_alpha = torch.sigmoid((alpha_ada-0.5)*6)
                 temp_z = (1-temp_alpha) * z + temp_alpha * latent_y
-                # temp_z = torch.sqrt(1-temp_alpha) * z + torch.sqrt(temp_alpha) * latent_y
-                # with torch.no_grad():
-                #     temp_z.data = temp_z / torch.norm(temp_z, p=2) * d
                 x_t = checkpoint(checkpointed_integrate, temp_z)
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
                 decoded_output = torch.sin(vae.decode(x_t).sample)
@@ -715,8 +764,9 @@ def solve(config_name: str) -> None:
             z_rel_updates.append(rel_update.item())
             z_prev = z.clone().detach()
             # scheduler.step()
-            with torch.no_grad():
-                z.data = z / torch.norm(z, p=2) * math.sqrt(z.numel())
+            if is_gauss_reg:
+                with torch.no_grad():
+                    z.data = z / torch.norm(z, p=2) * math.sqrt(z.numel())
             losses.append(loss.item())
             
             # print("Opt Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
