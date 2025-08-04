@@ -433,7 +433,7 @@ def super_resolution_task(config_name: str) -> None:
     num_inference_steps = 7
     guidance_scale = 2.0
     lr = 1e-2
-    epochs = 5000
+    epochs = 10000
     strength = 1.0
     collect_timesteps_and_sigmas = "FMPlug"
     loss_type = "L1 + TV"
@@ -477,6 +477,7 @@ def super_resolution_task(config_name: str) -> None:
     noise_sigma = 0.03
     img_outputs = prepare_super_resolution_measurement(
         image_path="/users/5/dever120/FMPlug/data/ffhq_baby.png",
+        # image_path="/users/5/dever120/FMPlug/data/afhq_cat.png",
         image_size=image_size,
         scale_factor=scale_factor,
         noise_sigma=noise_sigma,
@@ -516,29 +517,36 @@ def super_resolution_task(config_name: str) -> None:
     #     "distractions—just a calm, elegant feline gaze."
     # )
 
+    # prompt = (
+    #     "A close-up ultra-realistic portrait of an adorable baby lying on a plush blanket, "
+    #     "soft natural light gently streaming across their face. The baby has "
+    #     "smooth, glowing skin, round cheeks, and expressive deep eyes that "
+    #     "gaze curiously forward. Their short black hair is neatly combed, "
+    #     "slightly tousled near the crown. They wear a soft green and white "
+    #     "striped onesie with a comfortable, relaxed fit. The background is a "
+    #     "cozy, vibrant aqua blue cushion that adds warmth and serenity to "
+    #     "the scene. The baby appears calm and alert, with a subtle hint of "
+    #     "a smile forming on their lips. The lighting emphasizes the soft "
+    #     "features of their face, creating gentle highlights and shadows. "
+    #     "Photographed with a shallow depth of field, the background is "
+    #     "pleasantly blurred, drawing focus to the baby’s delicate features. "
+    #     "There’s a soothing atmosphere, evoking feelings of peace, innocence, "
+    #     "and tenderness. The composition is balanced, centering the baby’s "
+    #     "face with careful attention to natural textures and colors. A faint "
+    #     "blue beam of light diagonally crosses the image, adding a dreamy, "
+    #     "ethereal quality. The image should reflect ultra-realistic detail, "
+    #     "with lifelike textures in the skin, fabric, and lighting. Emphasize "
+    #     "the softness of the environment and the purity of the baby’s "
+    #     "expression. Render in high resolution, cinematic color grading, "
+    #     "diffused light, 85mm lens, f/1.4, shallow depth of field, ultra-"
+    #     "realistic detail, natural skin tones, soft bokeh, hyperrealist style."
+    # )
+
     prompt = (
-        "A close-up portrait of an adorable baby lying on a plush blanket, "
-        "soft natural light gently streaming across their face. The baby has "
-        "smooth, glowing skin, round cheeks, and expressive deep eyes that "
-        "gaze curiously forward. Their short black hair is neatly combed, "
-        "slightly tousled near the crown. They wear a soft green and white "
-        "striped onesie with a comfortable, relaxed fit. The background is a "
-        "cozy, vibrant aqua blue cushion that adds warmth and serenity to "
-        "the scene. The baby appears calm and alert, with a subtle hint of "
-        "a smile forming on their lips. The lighting emphasizes the soft "
-        "features of their face, creating gentle highlights and shadows. "
-        "Photographed with a shallow depth of field, the background is "
-        "pleasantly blurred, drawing focus to the baby’s delicate features. "
-        "There’s a soothing atmosphere, evoking feelings of peace, innocence, "
-        "and tenderness. The composition is balanced, centering the baby’s "
-        "face with careful attention to natural textures and colors. A faint "
-        "blue beam of light diagonally crosses the image, adding a dreamy, "
-        "ethereal quality. The image should reflect ultra-realistic detail, "
-        "with lifelike textures in the skin, fabric, and lighting. Emphasize "
-        "the softness of the environment and the purity of the baby’s "
-        "expression. Render in high resolution, cinematic color grading, "
-        "diffused light, 85mm lens, f/1.4, shallow depth of field, ultra-"
-        "realistic detail, natural skin tones, soft bokeh, hyperrealist style."
+        "close-up of a cute baby lying on a teal blanket, wearing a "
+        "green striped onesie, soft lighting, natural expression, "
+        "shallow depth of field, high-resolution, photorealistic, "
+        "detailed face, calm atmosphere, infant portrait photography"
     )
 
     # prompt = (
@@ -609,13 +617,22 @@ def super_resolution_task(config_name: str) -> None:
         # latent and random gaussian
         # For these tasks we will use noisy GT as the input
         # to the encoder
-        img_to_encode = (ref_img * 2.0) - 1.0
+        img_to_encode = torch.nn.functional.interpolate(
+            y_n,  # y_n is already in the range [-1, 1]
+            size=(image_size, image_size),
+            mode="bilinear",
+            align_corners=False,
+        )
+
+        # Encoder expects images in -1 to 1 so just clamp to make sure
+        # this is true
+        img_to_encode = torch.clamp(img_to_encode, -1.0, 1.0)
 
         # Add a small amount of noise to the GT image
-        img_to_encode = ref_img + noise_sigma * torch.randn(
-            ref_img.shape, device=device, dtype=torch.float32
-        )
-        img_to_encode = img_to_encode.permute(2, 0, 1).unsqueeze(0)
+        # img_to_encode = ref_img + noise_sigma * torch.randn(
+        #     ref_img.shape, device=device, dtype=torch.float32
+        # )
+        # img_to_encode = img_to_encode.permute(2, 0, 1).unsqueeze(0)
 
         latents = sd3_pipeline.vae.encode(img_to_encode).latent_dist.sample()
 
@@ -635,6 +652,9 @@ def super_resolution_task(config_name: str) -> None:
         z = latents
 
     z = z.requires_grad_(True)
+
+    prompt_embeds = prompt_embeds.requires_grad_(True)
+    pooled_prompt_embeds = pooled_prompt_embeds.requires_grad_(True)
 
     # We will log this with wandb
     initial_z_min = z.min()
@@ -657,11 +677,18 @@ def super_resolution_task(config_name: str) -> None:
     #     if "up_blocks.1" in name:
     #         parameters.requires_grad = True
 
+    # for name, parameters in sd3_pipeline.vae.named_parameters():
+    #     if "up_blocks.0" in name:
+    #         parameters.requires_grad = True
+
     optimizer = torch.optim.Adam(
         [
             {"params": [z], "lr": lr},
-            {"params": sd3_pipeline.vae.decoder.up_blocks[-1].parameters(), "lr": 1e-3},
-            {"params": sd3_pipeline.vae.decoder.up_blocks[-2].parameters(), "lr": 1e-4},
+            {"params": sd3_pipeline.vae.decoder.up_blocks[-1].parameters(), "lr": 1e-4},
+            {"params": sd3_pipeline.vae.decoder.up_blocks[-2].parameters(), "lr": 1e-5},
+            # {"params": sd3_pipeline.vae.decoder.up_blocks[1].parameters(), "lr": 1e-5},
+            {"params": prompt_embeds, "lr": 1e-5},
+            {"params": pooled_prompt_embeds, "lr": 1e-5},
         ]
     )
 
@@ -708,12 +735,13 @@ def super_resolution_task(config_name: str) -> None:
 
         optimizer.zero_grad()
 
-        # z0 = (z - z.mean()) / z.std()
+        z0 = (z - z.mean()) / z.std()
         # z0 = z - z.mean()
+        # z0 = z / z.norm() * torch.sqrt(z.numel())
 
         x_t = integrate_euler_v2(
             f=sd3_pipeline.predict,
-            x0=z,
+            x0=z0,
             timesteps=timesteps,
             sigmas=sigmas,
             prompt_embeds=prompt_embeds,
@@ -770,7 +798,7 @@ def super_resolution_task(config_name: str) -> None:
                 pixel_loss.item(),
                 # channel_loss.item(),
             )
-            loss = pixel_loss + 0.1 * tv_loss  # + 0.05 * lpips_loss
+            loss = pixel_loss + 0.1 * tv_loss
 
         # elif loss_type == "L1 + Grad":
         #     loss = pixel_loss + 0.2 * grad_mag_loss

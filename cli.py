@@ -5,7 +5,7 @@ import click
 from fmplug.tasks.discovery_tasks.sd3_regression import sd3_regression_task
 from fmplug.tasks.non_linear_deblurring import non_linear_deblurring_task
 from fmplug.tasks.optuna_super_resolution import optunized_super_resolution
-from fmplug.tasks.super_resolution_v4 import super_resolution_task
+from fmplug.tasks.super_resolution_v5 import super_resolution_task
 from fmplug.tasks.turbulence import turbulence_task  # type: ignore
 
 
