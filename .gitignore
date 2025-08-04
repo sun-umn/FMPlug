@@ -26,3 +26,8 @@ models/*
 *div2k*
 *output*
 *secrets*
+
+# data
+*.png
+*.pt
+*.mp4
