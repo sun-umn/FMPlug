@@ -1,4 +1,5 @@
 import logging
+import pickle
 from typing import Callable
 
 import torch
@@ -15,6 +16,24 @@ if not logger.handlers:
     formatter = logging.Formatter("[%(levelname)s] %(message)s")
     ch.setFormatter(formatter)
     logger.addHandler(ch)
+
+
+# Open the polynomial model variance data for
+# normalization
+with open("poly13_model_var.pkl", "rb") as f:
+    reg = pickle.load(f)
+
+
+def normalize_latent(z_x: torch.Tensor, t_x: torch.Tensor):
+    """
+    Normalize z_x at time t_x using interpolated mean and variance per channel.
+    z_x: (B, C, H, W)
+    t_x: scalar (float or 0-dim tensor)
+    """
+    z_var = reg(t_x.detach().cpu().numpy())
+    z_var = torch.tensor(z_var, dtype=z_x.dtype, device=z_x.device)
+    z_x = torch.sqrt(z_var / torch.var(z_x, unbiased=False)) * z_x
+    return z_x
 
 
 def integrate_euler(
