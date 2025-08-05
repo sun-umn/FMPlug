@@ -123,6 +123,7 @@ def super_resolution_task(config_name: str) -> None:
             guidance_scale=guidance_scale,
             device=device,
         )
+        gradient_clipping_value = 0.1
 
     elif ode_solver == "euler":
         sd3_pipeline = StableDiffusion3BaseV2(
@@ -132,6 +133,7 @@ def super_resolution_task(config_name: str) -> None:
             guidance_scale=guidance_scale,
             device=device,
         )
+        gradient_clipping_value = 0.005
 
     prompt = """
         A close-up portrait of a baby with soft skin, short dark hair,
@@ -302,7 +304,7 @@ def super_resolution_task(config_name: str) -> None:
         # Clip gradients (example: max norm = 1.0)
         # Found this value to work well for Heun2 - may need to be tuned
         # for euler
-        torch.nn.utils.clip_grad_norm_([z], max_norm=0.005)
+        torch.nn.utils.clip_grad_norm_([z], max_norm=gradient_clipping_value)
 
         scaler.step(optimizer)
         scaler.update()
