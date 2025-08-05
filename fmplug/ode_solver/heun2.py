@@ -1,128 +1,147 @@
 # stdlib
+import logging
+import pickle
 from typing import Callable
 
 # third party
 import torch
-import tqdm
+
+# ----------------------------
+# Setup logger
+# ----------------------------
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+if not logger.handlers:
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.DEBUG)
+    formatter = logging.Formatter("[%(levelname)s] %(message)s")
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
 
 
-def integrate_euler(
+# Open the polynomial model variance data for
+# normalization
+with open("poly13_model_var.pkl", "rb") as f:
+    reg = pickle.load(f)
+
+
+# To normalize the latent variable upon entry
+def normalize_latent(z_x: torch.Tensor, t_x: torch.Tensor):
+    """
+    Normalize z_x at time t_x using interpolated mean and variance per channel.
+    z_x: (B, C, H, W)
+    t_x: scalar (float or 0-dim tensor)
+    """
+    z_var = reg(t_x.detach().cpu().numpy())
+    z_var = torch.tensor(z_var, dtype=z_x.dtype, device=z_x.device)
+    z_x = torch.sqrt(z_var / torch.var(z_x, unbiased=False)) * z_x
+    return z_x
+
+
+def integrate_heun(
     f: Callable,
     x0: torch.Tensor,
     timesteps: torch.Tensor,
     sigmas: torch.Tensor,
-    prompt_embedding: torch.Tensor,
-    pooled_embedding: torch.Tensor,
-    device: torch.device,
+    step_index: int,
+    prompt_embeds: torch.Tensor,
+    pooled_prompt_embeds: torch.Tensor,
     guidance_scale: float = 2.0,
+    s_churn: float = 0.0,
+    s_tmin: float = 0.0,
+    s_tmax: float = float("inf"),
 ) -> torch.Tensor:
     """
-    Function that implements the Heun 2 ode solver.
+    Function that implements the Heun ODE solver.
     """
-    # Start ODE solver
-    current_timesteps = timesteps[:-1]
-    previous_timesteps = timesteps[1:]
-    current_sigmas = sigmas[:-1]
-    previous_sigmas = sigmas[1:]
+    do_guidance = guidance_scale > 1.0
+    prev_derivative = None
+    dt = None
+    state_in_first_order = dt is None
 
-    integrate_parameters = zip(
-        current_timesteps,
-        previous_timesteps,
-        current_sigmas,
-        previous_sigmas,
-    )
+    logger.debug(f"Timesteps: {timesteps.cpu().numpy()}")
 
-    do_classifier_free_guidance = guidance_scale > 1.0
+    for idx, t0 in enumerate(timesteps):
+        if state_in_first_order:
+            sigma = sigmas[step_index]
+            sigma_next = sigmas[step_index + 1]
+        else:
+            sigma = sigmas[step_index - 1]
+            sigma_next = sigmas[step_index]
 
-    for _, (t0, t1, sigma, sigma_next) in tqdm.tqdm(enumerate(integrate_parameters)):
-        # print(x0.norm(), x0.mean(), x0.var())
-        # x0 will be the latent variable
-        latent_model_input = torch.cat([x0] * 2) if do_classifier_free_guidance else x0
+        gamma = (
+            min(s_churn / (len(sigmas) - 1), 2**0.5 - 1)
+            if s_tmin <= sigma <= s_tmax
+            else 0.0
+        )
+        sigma_hat = sigma * (gamma + 1)
 
-        # broadcast to batch dimension in a way that's compatible with ONNX / Core ML
-        timestep = t0.expand(latent_model_input.shape[0])
-        prev_timestep = t1.expand(latent_model_input.shape[0])
+        logger.debug(
+            f"Step {step_index}: sigma={sigma.item():.4f}, "
+            f"sigma_next={sigma_next.item():.4f}, "
+            f"sigma_hat={sigma_hat.item():.4f}"
+        )
 
-        # upcast to avoid precision issues
-        sample = x0.to(torch.float32)
-        dt = sigma_next - sigma
+        latent_input = torch.cat([x0] * 2) if do_guidance else x0
+        timestep = t0.expand(latent_input.shape[0])
 
-        # Heun2
-        k1 = f(
-            x=latent_model_input,
+        noise_pred = f(
+            x=latent_input,
             t=timestep,
-            prompt_embedding=prompt_embedding,
-            pooled_embedding=pooled_embedding,
-            device=device,
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
         )
 
-        # Predict next latent using Euler step
-        x1_pred = latent_model_input + dt * k1
-
-        # k2
-        k2 = f(
-            x=x1_pred,
-            t=prev_timestep,
-            prompt_embedding=prompt_embedding,
-            pooled_embedding=pooled_embedding,
-            device=device,
+        logger.debug(
+            "Noise BEFORE guidance: "
+            f"min={noise_pred.min().item():.6f}, "
+            f"max={noise_pred.max().item():.6f}"
         )
 
-        # Heun2 step (average slope)
-        noise_pred = 0.5 * dt * (k1 + k2)
+        if do_guidance:
+            uncond, text = noise_pred.chunk(2)
+            noise_pred = uncond + guidance_scale * (text - uncond)
 
-        # TODO: Keep here for now this is the RK4 implementation
-        # Rk4
-        # half_dt = 0.5 * dt
-        # k1 = f(
-        #     x=latent_model_input,
-        #     t=timestep,
-        #     prompt_embedding=prompt_embedding,
-        #     pooled_embedding=pooled_embedding,
-        #     device=device,
-        # )
+        logger.debug(
+            "Noise AFTER guidance: "
+            f"min={noise_pred.min().item():.6f}, "
+            f"max={noise_pred.max().item():.6f}"
+        )
 
-        # k2 = f(
-        #     x=(latent_model_input + half_dt * k1),
-        #     t=(timestep + half_dt),
-        #     prompt_embedding=prompt_embedding,
-        #     pooled_embedding=pooled_embedding,
-        #     device=device,
-        # )
+        if state_in_first_order:
+            denoised = x0 - noise_pred * sigma
+            derivative = (x0 - denoised) / sigma_hat
+            dt = sigma_next - sigma_hat
+            prev_derivative = derivative
+            prev_x0 = x0
+            prev_sample = x0 + derivative * dt
+            x0 = prev_sample
 
-        # k3 = f(
-        #     x=(latent_model_input + half_dt * k2),
-        #     t=(timestep + half_dt),
-        #     prompt_embedding=prompt_embedding,
-        #     pooled_embedding=pooled_embedding,
-        #     device=device,
-        # )
-
-        # k4 = f(
-        #     x=(latent_model_input + dt * k3),
-        #     t=prev_timestep,
-        #     prompt_embedding=prompt_embedding,
-        #     pooled_embedding=pooled_embedding,
-        #     device=device,
-        # )
-
-        # noise_pred = (k1 + 2 * (k2 + k3) + k4) * dt * (1 / 6)
-        # noise_pred = noise_pred.to(noise_pred.dtype)
-
-        if do_classifier_free_guidance:
-            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + guidance_scale * (
-                noise_pred_text - noise_pred_uncond
+            logger.debug(
+                "First order step: "
+                f"x0.min={x0.min().item():.6f}, "
+                f"x0.max={x0.max().item():.6f}"
             )
 
+            state_in_first_order = dt is None
         else:
-            noise_pred, noise_pred_text = noise_pred.chunk(2)
+            denoised = x0 - noise_pred * sigma_next
+            derivative = (x0 - denoised) / sigma_next
+            derivative = 0.5 * (prev_derivative + derivative)
+            x0 = prev_x0 + derivative * dt
 
-        # Update step for huen2
-        prev_sample = sample + noise_pred
+            logger.debug(
+                "Second order step: "
+                f"x0.min={x0.min().item():.6f}, "
+                f"x0.max={x0.max().item():.6f}"
+            )
 
-        prev_sample = prev_sample.to(torch.float32)
+            prev_derivative = None
+            dt = None
+            state_in_first_order = dt is None
+            prev_x0 = None
 
-        x0 = prev_sample
+        step_index += 1
 
     return x0
