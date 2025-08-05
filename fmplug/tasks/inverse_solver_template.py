@@ -128,7 +128,7 @@ def super_resolution_task(config_name: str) -> None:
     elif ode_solver == "euler":
         sd3_pipeline = StableDiffusion3BaseV2(
             model_key="stabilityai/stable-diffusion-3-medium-diffusers",
-            scheduler=FlowMatchEulerDiscreteScheduler(shift=4.0),
+            scheduler=FlowMatchEulerDiscreteScheduler(),
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             device=device,
