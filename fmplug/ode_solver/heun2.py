@@ -26,6 +26,7 @@ with open("poly13_model_var.pkl", "rb") as f:
     reg = pickle.load(f)
 
 
+# To normalize the latent variable upon entry
 def normalize_latent(z_x: torch.Tensor, t_x: torch.Tensor):
     """
     Normalize z_x at time t_x using interpolated mean and variance per channel.
