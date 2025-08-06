@@ -214,15 +214,19 @@ def normalize_latent(z_x: torch.Tensor, t_x: torch.Tensor) -> torch.Tensor:
     Returns:
         torch.Tensor: The normalized latent tensor.
     """
-    z_var = reg(1000-t_x.detach().cpu().numpy())
-    z_var = torch.tensor(z_var, dtype=z_x.dtype, device=z_x.device)
-    scale = torch.sqrt(z_var / torch.var(z_x, unbiased=False))
+    z_var = reg(t_x.detach().cpu().numpy())
+    # z_var = torch.tensor(z_var, dtype=z_x.dtype, device=z_x.device)
+    # scale = torch.sqrt(z_var / torch.var(z_x, unbiased=False))
+    # z_scaled = z_x * scale
+    inst_norm = torch.nn.InstanceNorm2d(z_x.shape[1], affine=False)
+    z_x_norm = inst_norm(z_x)
+    z_scaled = z_x_norm * z_var**0.5
     # print("t_x: ", t_x.item())
     # print("Var(Z_t)", z_var.item())
     # print("Var(z_t)", torch.var(z_x, unbiased=False).item())
-    # print("Var(Z_t)/Var(z_t): ", scale.item())
-    z_x = scale * z_x
-    return z_x
+    # print("sqrt(Var(Z_t)/Var(z_t)): ", scale.item())
+    z_scaled = z_x
+    return z_scaled
 
 def integrate(
     f,
@@ -233,8 +237,8 @@ def integrate(
     pooled_prompt_embedding,
     device,
     guidance_scale: float = 7.0,
-    method: str = "heun2"
-):
+    method: str = "heun2"):
+    
     do_classifier_free_guidance = guidance_scale > 1.0
     # print("t: ", t)
     # print("NFE: ", NFE)
@@ -558,6 +562,8 @@ def solve(config_name: str) -> None:
         
         def encode(image: torch.Tensor) -> torch.Tensor:
             z = vae.encode(image).latent_dist.sample()
+            print("vae.encode(image): ", vae.encode(image))
+            print("vae.encode(image).latent_dist: ", vae.encode(image).latent_dist)
             z = (z-vae.config.shift_factor) * vae.config.scaling_factor
             return z
 
@@ -584,23 +590,23 @@ def solve(config_name: str) -> None:
         img = img.to(device)
         with torch.no_grad():
             latent_y = encode(img)
+            # latent_y = (latent_y - latent_y.mean()) / latent_y.std()
             latent_y = latent_y.detach()
             latent_y = latent_y.requires_grad_(False)
         
         del img
 
        
+        print("latent_y: ", latent_y.mean(), latent_y.std())
         
         z = torch.randn_like(latent_y)
         z = z / torch.norm(z, p=2) * math.sqrt(z.numel())
         z = torch.nn.parameter.Parameter(z, True).to(device)
         z = z.requires_grad_(True)
-        
+                
         alpha_ada = torch.tensor(alpha).to(device)
         alpha_ada = alpha_ada.requires_grad_(True)
         t_ada = (1 - torch.sigmoid((alpha_ada-0.5)*6))
-
-        # amplitude = torch.tensor(torch.pi).to(dtype=data_type, device=device)
         
         # Solve the ODE
         print("Solve inverse problem ...")
@@ -653,7 +659,6 @@ def solve(config_name: str) -> None:
         
         if optimizer_select == "adam":
             params_group1 = {'params': z, 'lr': lr[0]}
-            # params_group2 = {'params': t_ada, 'lr': lr_t_ada}
             params_group2 = {'params': alpha_ada, 'lr': lr_alpha_ada}
             
             # Get decoder blocks for incremental fine-tuning
@@ -689,6 +694,9 @@ def solve(config_name: str) -> None:
                 temp_z = (1-temp_alpha) * z + temp_alpha * latent_y
                 x_t = checkpoint(checkpointed_integrate, temp_z)
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
+                # print("vae.config.scaling_factor: ", vae.config.scaling_factor)
+                # print("vae.config.shift_factor: ", vae.config.shift_factor)
+                # print("vae.decode(x_t): ", vae.decode(x_t))
                 decoded_output = torch.sin(vae.decode(x_t).sample)
 
                 if measure_config['operator']['name'] == 'inpainting':
@@ -822,6 +830,11 @@ def solve(config_name: str) -> None:
                     df_new.to_csv(log_path, mode='a', header=False, index=False)
                 else:
                     df_new.to_csv(log_path, mode='w', header=True, index=False)
+                    
+                if iterator % 5 == 0:
+                    visualize_image(ref_numpy, y_n_numpy, output_numpy, os.path.join(save_dir, rel_dir, f"img_diff_{str(iterator)}.png"))
+                    np.save(os.path.join(save_dir, rel_dir, f"reconstruction_{str(iterator)}.npy"), output_numpy)
+                    save_png_cv2(output_numpy, os.path.join(save_dir, rel_dir, f"reconstruction_{str(iterator)}.png"))
                 
                 if early_stop_indicator.get_flag() == False:
                     if optimizer_select == "adam":
