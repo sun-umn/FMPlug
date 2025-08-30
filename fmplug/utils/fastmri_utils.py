@@ -4,12 +4,15 @@ This source code is licensed under the MIT license found in the
 LICENSE file in the root directory of this source tree.
 """
 
+# stdlib
 from typing import List, Optional
 
+# third party
 import torch
 from packaging import version
 
 if version.parse(torch.__version__) >= version.parse("1.7.0"):
+    # third party
     import torch.fft  # type: ignore
 
 

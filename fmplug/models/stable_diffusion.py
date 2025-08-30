@@ -4,7 +4,11 @@ from typing import Any, List, Optional, Tuple, Union
 
 # third party
 import torch
-from diffusers import StableDiffusion3Img2ImgPipeline, StableDiffusion3Pipeline
+from diffusers import (
+    AutoencoderTiny,
+    StableDiffusion3Img2ImgPipeline,
+    StableDiffusion3Pipeline,
+)
 from diffusers.schedulers.scheduling_flow_match_heun_discrete import (
     FlowMatchHeunDiscreteScheduler,
 )
@@ -24,6 +28,12 @@ class StableDiffusion3Base:
         pipe = StableDiffusion3Pipeline.from_pretrained(
             model_key, torch_dtype=self.dtype
         )
+
+        # Replace the VAE with the Tiny VAE
+        pipe.vae = AutoencoderTiny.from_pretrained(
+            "madebyollin/taesd3", torch_dtype=torch.float16
+        )
+        pipe.vae.config.shift_factor = 0.0
         pipe = pipe.to(device)
         self.pipe = pipe
 
@@ -38,13 +48,13 @@ class StableDiffusion3Base:
 
         self.vae = pipe.vae
         self.vae.eval()
-        # self.vae.requires_grad_(False)
-        self.vae.enable_gradient_checkpointing()
+        self.vae.requires_grad_(False)
+        # self.vae.enable_gradient_checkpointing()
 
         self.transformer = pipe.transformer.to(device)
         self.transformer.eval()
         self.transformer.requires_grad_(False)
-        self.transformer.enable_gradient_checkpointing()
+        # self.transformer.enable_gradient_checkpointing()
 
         self.vae_scale_factor = (
             2 ** (len(self.vae.config.block_out_channels) - 1)
@@ -183,6 +193,12 @@ class StableDiffusion3BaseV2:
                 torch_dtype=self.dtype,
             )
 
+        # # Replace the VAE with the Tiny VAE
+        # pipe.vae = AutoencoderTiny.from_pretrained(
+        #     "madebyollin/taesd3", torch_dtype=self.dtype
+        # )
+        # pipe.vae.config.shift_factor = 0.0
+
         pipe = pipe.to(device)
         self.pipe = pipe
         self.pipe.tokenizer_max_length = 77
@@ -208,6 +224,20 @@ class StableDiffusion3BaseV2:
         self.transformer.eval()
         self.transformer.requires_grad_(False)
         self.transformer.enable_gradient_checkpointing()
+
+        # # Add these lines to enable torch compile which is expected to
+        # # increase the speed
+        # self.pipe.set_progress_bar_config(disable=True)
+
+        # self.transformer.to(memory_format=torch.channels_last)
+        # self.vae.to(memory_format=torch.channels_last)
+
+        # self.transformer = torch.compile(
+        #     pipe.transformer, mode="max-autotune", fullgraph=True
+        # )
+        # self.vae.decode = torch.compile(
+        #     pipe.vae.decode, mode="max-autotune", fullgraph=True
+        # )
 
     def encode_prompts(
         self,
@@ -273,6 +303,9 @@ class StableDiffusion3BaseV2:
     def retrieve_timesteps_and_sigmas(
         self,
         strength: float = 1.0,
+        height: int = 512,
+        width: int = 512,
+        mu: float = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Function to collect the timesteps and sigmas for the SD3 pipeline.
@@ -281,6 +314,30 @@ class StableDiffusion3BaseV2:
         num_images_per_prompt = 1
         scheduler_kwargs: dict[str, Any] = {}
         sigmas = None
+
+        self.vae_scale_factor = self.pipe.vae_scale_factor
+
+        if self.scheduler.config.get("use_dynamic_shifting", None) and mu is None:
+            image_seq_len = (
+                int(height)
+                // self.vae_scale_factor
+                // self.transformer.config.patch_size
+            ) * (
+                int(width)
+                // self.vae_scale_factor
+                // self.transformer.config.patch_size
+            )
+            mu = calculate_shift(
+                image_seq_len,
+                self.scheduler.config.get("base_image_seq_len", 256),
+                self.scheduler.config.get("max_image_seq_len", 4096),
+                self.scheduler.config.get("base_shift", 0.5),
+                self.scheduler.config.get("max_shift", 1.16),
+            )
+            scheduler_kwargs["mu"] = mu
+
+        elif mu is not None:
+            scheduler_kwargs["mu"] = mu
 
         # The sigmas get modified in this step to align with the timesteps
         # and the number of inference steps
@@ -291,6 +348,7 @@ class StableDiffusion3BaseV2:
             sigmas=sigmas,
             **scheduler_kwargs,
         )
+        # Filter timesteps here
         timesteps, num_inference_steps = self.pipe.get_timesteps(
             num_inference_steps, strength, self.device
         )
@@ -382,3 +440,16 @@ def retrieve_timesteps(
         scheduler.set_timesteps(num_inference_steps, device=device, **kwargs)
         timesteps = scheduler.timesteps
     return timesteps, num_inference_steps
+
+
+def calculate_shift(
+    image_seq_len,
+    base_seq_len: int = 256,
+    max_seq_len: int = 4096,
+    base_shift: float = 0.5,
+    max_shift: float = 1.15,
+):
+    m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
+    b = base_shift - m * base_seq_len
+    mu = image_seq_len * m + b
+    return mu

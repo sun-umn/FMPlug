@@ -354,9 +354,9 @@ class UNet(nn.Module):
                     normalize=normalize,
                 )
                 if in_ht in attn_resolutions:
-                    block_modules['{}a_{}b_attn'.format(i_level, i_block)] = (
-                        SelfAttention(out_ch, normalize=normalize)
-                    )
+                    block_modules[
+                        '{}a_{}b_attn'.format(i_level, i_block)
+                    ] = SelfAttention(out_ch, normalize=normalize)
                 unet_chs += [out_ch]
                 in_ch = out_ch
             # Downsample
@@ -412,9 +412,9 @@ class UNet(nn.Module):
                     normalize=normalize,
                 )
                 if in_ht in attn_resolutions:
-                    block_modules['{}a_{}b_attn'.format(i_level, i_block)] = (
-                        SelfAttention(out_ch, normalize=normalize)
-                    )
+                    block_modules[
+                        '{}a_{}b_attn'.format(i_level, i_block)
+                    ] = SelfAttention(out_ch, normalize=normalize)
                 in_ch = out_ch
             # Upsample
             if i_level != 0:

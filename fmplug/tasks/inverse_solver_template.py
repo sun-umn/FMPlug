@@ -8,7 +8,11 @@ import lpips
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import tqdm
+import wandb
+import yaml
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
     FlowMatchEulerDiscreteScheduler,
 )
@@ -17,8 +21,8 @@ from diffusers.schedulers.scheduling_flow_match_heun_discrete import (
 )
 from skimage.metrics import peak_signal_noise_ratio
 from torchmetrics.image import StructuralSimilarityIndexMeasure
-
-import wandb
+from torchvision.models import vgg16
+from torchvision.models.feature_extraction import create_feature_extractor
 
 # first party
 from fmplug.models.stable_diffusion import StableDiffusion3BaseV2
@@ -30,10 +34,239 @@ from fmplug.utils.measurements import get_noise, get_operator
 # These presets are used for torch compile for SD3
 torch.set_float32_matmul_precision("high")
 
+
 # torch._inductor.config.conv_1x1_as_mm = True
 # torch._inductor.config.coordinate_descent_tuning = True
 # torch._inductor.config.epilogue_fusion = False
 # torch._inductor.config.coordinate_descent_check_all_directions = True
+
+# third party
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+def _logit(x):
+    return torch.log(x) - torch.log1p(-x)
+
+
+def _logit(x: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    # Safe logit for values in (0,1)
+    x = x.clamp(eps, 1 - eps)
+    return torch.log(x) - torch.log1p(-x)
+
+
+class MonotoneTimesteps(nn.Module):
+    """
+    Strictly decreasing timesteps spanning [t_min, t_max].
+    With learn_endpoints=True, endpoints are learned but constrained to 0 < t_min < t_max < 1.
+
+    Args:
+        t_init (1D Tensor | list): initial (nonincreasing) timestep vector, length >= 2.
+        learn_endpoints (bool): if True, learn t_min/t_max inside (0,1) with t_max > t_min.
+        eps (float): small numerical margin.
+        check_monotone (bool): if True, assert t_init is approx. nonincreasing.
+    """
+
+    def __init__(
+        self,
+        t_init,
+        learn_endpoints: bool = False,
+        eps: float = 1e-12,
+        check_monotone: bool = True,
+    ):
+        super().__init__()
+        t_init = torch.as_tensor(t_init, dtype=torch.get_default_dtype())
+        assert t_init.ndim == 1 and t_init.numel() >= 2, "t_init must be 1D with n>=2"
+        n = t_init.numel()
+
+        if check_monotone:
+            if not torch.all(t_init[:-1] >= t_init[1:] - 1e-12):
+                raise ValueError("t_init must be (approximately) nonincreasing.")
+
+        # endpoints from init (we'll project into (0,1) if learnable)
+        t_max_init = t_init.max()
+        t_min_init = t_init.min()
+
+        # softmax weights for positive gaps (strictly >0)
+        gaps = (t_init[:-1] - t_init[1:]).clamp_min(0.0)
+        w0 = (gaps + eps) / (gaps.sum() + eps * (n - 1))
+        u_init = torch.log(w0)  # softmax(log w0) == w0
+
+        self.u = nn.Parameter(u_init)  # length n-1
+        self.learn_endpoints = learn_endpoints
+        self.eps = eps
+
+        if learn_endpoints:
+            # --- Stick-breaking endpoints: 0 < t_min < t_max < 1 ---
+            t_min_clamped = t_min_init.clamp(eps, 1 - eps)
+            t_max_clamped = t_max_init.clamp(eps, 1 - eps)
+            if not (t_min_clamped < t_max_clamped):
+                # fallback to a valid small range if init is degenerate
+                t_min_clamped = torch.tensor(0.1, dtype=t_init.dtype)
+                t_max_clamped = torch.tensor(0.9, dtype=t_init.dtype)
+
+            gap_frac = (t_max_clamped - t_min_clamped) / (1 - t_min_clamped + eps)
+            gap_frac = gap_frac.clamp(eps, 1 - eps)
+
+            # Learn logits for t_min and gap fraction
+            self.a = nn.Parameter(_logit(t_min_clamped, eps))
+            self.b = nn.Parameter(_logit(gap_frac, eps))
+        else:
+            # Fixed endpoints as buffers (clamped to [0,1])
+            self.register_buffer("t_max", t_max_init.clamp(0.0, 1.0).clone())
+            self.register_buffer("t_min", t_min_init.clamp(0.0, 1.0).clone())
+
+    def _endpoints(self):
+        """Return (t_min, t_max) with 0 < t_min < t_max < 1."""
+        if self.learn_endpoints:
+            eps = self.eps
+            t_min = torch.sigmoid(self.a)  # (0,1)
+            gap_frac = torch.sigmoid(self.b)  # (0,1)
+            t_max = t_min + gap_frac * (1 - t_min)  # (t_min,1)
+
+            # tiny safety margins; use tensor-tensor bounds for clamp
+            t_min = t_min.clamp(min=eps, max=1 - 2 * eps)
+            upper = torch.full_like(t_min, 1 - eps)
+            t_max = torch.minimum(torch.maximum(t_max, t_min + eps), upper)
+            return t_min, t_max
+        else:
+            return self.t_min, self.t_max
+
+    def forward(self) -> torch.Tensor:
+        # positive weights summing to 1
+        w = F.softmax(self.u, dim=0)  # (n-1,)
+        t_min, t_max = self._endpoints()
+
+        # gaps that sum to (t_max - t_min)
+        deltas = (t_max - t_min) * w  # (n-1,), strictly > 0
+
+        t = torch.empty(self.u.numel() + 1, device=w.device, dtype=w.dtype)
+        t[0] = t_max
+        t[1:] = t_max - torch.cumsum(deltas, dim=0)
+
+        # keep inside [0,1] (should already hold; this guards round-off)
+        return t.clamp(0.001, 1.0)
+
+
+class GramMatrixLoss(nn.Module):
+    def __init__(self, device="cuda"):
+        super().__init__()
+
+        self.device = device
+
+        # Extract specific layers (relu1_2, relu2_2, relu3_3)
+        vgg = vgg16(pretrained=True).features.to(device).eval()
+        return_nodes = {
+            "3": "relu1_2",  # after 2nd conv
+            "8": "relu2_2",
+            "15": "relu3_3",
+        }
+        self.feature_extractor = create_feature_extractor(vgg, return_nodes)
+        for param in self.feature_extractor.parameters():
+            param.requires_grad = False
+
+        # Register VGG mean and std buffers for normalization
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+        self.register_buffer("vgg_mean", mean)
+        self.register_buffer("vgg_std", std)
+
+    def normalize_vgg(self, x):
+        return (x - self.vgg_mean) / self.vgg_std
+
+    def forward(self, pred, target):
+        # Normalize inputs before feeding into VGG
+        pred = self.normalize_vgg(pred)
+        target = self.normalize_vgg(target)
+
+        pred_feats = self.feature_extractor(pred)
+        target_feats = self.feature_extractor(target)
+
+        loss = 0.0
+        for key in pred_feats:
+            G_pred = self.gram_matrix(pred_feats[key])
+            G_target = self.gram_matrix(target_feats[key])
+            loss += F.l1_loss(G_pred, G_target)
+        return loss
+
+    @staticmethod
+    def gram_matrix(feat):
+        B, C, H, W = feat.size()
+        feat = feat.view(B, C, -1)
+        G = torch.bmm(feat, feat.transpose(1, 2))  # (B, C, C)
+        return G / (C * H * W)
+
+
+class VGG16PerceptualLoss(nn.Module):
+    def __init__(self, layers=("relu1_2", "relu2_2", "relu3_3", "relu4_3", "relu5_3")):
+        super().__init__()
+        vgg_features = vgg16(pretrained=True).features.eval()
+        self.layer_name_map = {
+            "relu1_2": 3,
+            "relu2_2": 8,
+            "relu3_3": 15,
+            "relu4_3": 22,
+            "relu5_3": 29,
+        }
+        self.selected_layers = layers
+        self.layers_to_extract = {name: self.layer_name_map[name] for name in layers}
+        self.vgg = nn.Sequential(
+            *[vgg_features[i] for i in range(max(self.layers_to_extract.values()) + 1)]
+        )
+
+        for param in self.vgg.parameters():
+            param.requires_grad = False
+
+    def forward(self, x, y):
+        mean = torch.tensor([0.485, 0.456, 0.406], device=x.device).view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device=x.device).view(1, 3, 1, 1)
+        x = (x - mean) / std
+        y = (y - mean) / std
+
+        loss = 0.0
+        x_feats = {}
+        y_feats = {}
+        current_layer = 0
+
+        for i, layer in enumerate(self.vgg):
+            x = layer(x)
+            y = layer(y)
+            if i in self.layers_to_extract.values():
+                name = [k for k, v in self.layers_to_extract.items() if v == i][0]
+                x_feats[name] = x
+                y_feats[name] = y
+
+        for name in self.selected_layers:
+            loss += nn.functional.l1_loss(x_feats[name], y_feats[name])
+        return loss
+
+
+class MultiChannelLoss(torch.nn.Module):
+    def forward(self, y_pred, y_true):
+        # These will be multi-channeled
+        y_pred = y_pred.squeeze(0)
+        y_true = y_true.squeeze(0)
+
+        first_channel_loss = torch.abs(y_pred[0, :, :] - y_true[0, :, :]).mean()
+        second_channel_loss = torch.abs(y_pred[1, :, :] - y_true[1, :, :]).mean()
+        third_channel_loss = torch.abs(y_pred[2, :, :] - y_true[2, :, :]).mean()
+
+        return first_channel_loss + second_channel_loss + third_channel_loss
+
+
+class ChannelExpandCompress(nn.Module):
+    def __init__(self, in_channels=16, mid_channels=256, out_channels=16):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, kernel_size=1, stride=1, padding=0),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, out_channels, kernel_size=1, stride=1, padding=0),
+            nn.InstanceNorm2d(out_channels, affine=True),
+        )
+
+    def forward(self, z):
+        return self.conv(z)
 
 
 def set_seed(seed):
@@ -55,24 +288,64 @@ def total_variation_loss(x):
     )
 
 
-def super_resolution_task(config_name: str) -> None:
-    # Configuration
-    image_size = 512
-    scale_factor = 4
-    num_inference_steps = 12
-    guidance_scale = 3.0
-    lr = 1e-2
-    epochs = 1000
-    strength = 0.90
-    ode_solver = "euler"
+# Compute cosine similarity per layer
+def cosine_similarity_per_layer(feats0, feats1, eps=1e-8):
+    cos_sims = []
+    for f0, f1 in zip(feats0, feats1):
+        B, C, H, W = f0.shape
+        f0_flat = f0.view(B, C, -1)
+        f1_flat = f1.view(B, C, -1)
+        f0_norm = F.normalize(f0_flat, dim=1, eps=eps)
+        f1_norm = F.normalize(f1_flat, dim=1, eps=eps)
+        cos_sim = (f0_norm * f1_norm).sum(dim=1).mean(dim=1)  # [B]
+        cos_sims.append(cos_sim)
+    return torch.stack(cos_sims, dim=1).squeeze(0)  # shape: [num_layers]
 
-    # NOTE: Seed was 123
-    device = torch.device("cuda")
-    set_seed(0)
+
+# Compute LPIPS loss per layer (unnormalized, for comparison)
+def lpips_loss_per_layer(feats0, feats1, net):
+    losses = []
+    for f0, f1, weight in zip(feats0, feats1, net.lins):
+        diff = (f0 - f1) ** 2
+        weighted = weight.model[1].weight.view(1, -1, 1, 1) * diff
+        loss = weighted.sum(dim=1).mean()
+        losses.append(loss.item())
+    return losses
+
+
+def super_resolution_task(config_name: str) -> None:
+    # Load configuration from YAML file
+    base_config_path = "fmplug/configs/super_resolution"
+    config_file_path = os.path.join(base_config_path, config_name + ".yaml")
+
+    with open(config_file_path, "r") as file:
+        config = yaml.safe_load(file)
+
+    # Extract configuration parameters
+    image_size = config["image_size"]
+    scale_factor = config["scale_factor"]
+    num_inference_steps = config["num_inference_steps"]
+    guidance_scale = config["guidance_scale"]
+    lr = config["lr"]
+    epochs = config["epochs"]
+    strength = config["strength"]
+    ode_solver = config["ode_solver"]
+    shift = config.get("shift", 3.0)
+    prompt = config["prompt"]
+    device = torch.device(config["device"])
+    seed = config["seed"]
+    noise_sigma = config["noise_sigma"]
+    image_path = config["image_path"]
+    prompt_image_path = config["prompt_image_path"]
+    wandb_project = config["wandb_project"]
+    wandb_tags = config["wandb_tags"]
+    save_base_path = config["save_base_path"]
+
+    # Set random seed
+    set_seed(seed)
 
     # Global variables for wandb
     API_KEY = os.environ.get("WANDB_API_KEY")
-    PROJECT_NAME = "FMPlug"
 
     # Enable wandb
     print("Initialize Project ...")
@@ -80,8 +353,8 @@ def super_resolution_task(config_name: str) -> None:
 
     wandb_instance = wandb.init(  # type: ignore
         # set the wandb project where this run will be logged
-        project=PROJECT_NAME,
-        tags=["Experimental", "Super Resolution"],
+        project=wandb_project,
+        tags=wandb_tags,
         config={
             "lr": lr,
             "epochs": epochs,
@@ -92,20 +365,29 @@ def super_resolution_task(config_name: str) -> None:
             "strength": strength,
             "config_name": config_name,
             "ode_solver": ode_solver,
+            "prompt": prompt,
+            "use_mp": False,
         },
     )
 
     # Create the directory to save all of the model results
     wandb_experiment_id = wandb_instance.id
-    save_file_path = f"/users/5/dever120/FMPlug/experiments/{wandb_experiment_id}"
+    save_file_path = os.path.join(save_base_path, wandb_experiment_id)
     os.makedirs(save_file_path, exist_ok=True)
 
     # Load an image and simulate the measurement process
-    noise_sigma = 0.03
     img_outputs = prepare_super_resolution_measurement(
-        image_path="/users/5/dever120/FMPlug/data/ffhq_baby.png",
-        # image_path="/users/5/dever120/FMPlug/data/afhq_cat.png",
-        # image_path="/users/5/dever120/FMPlug/data/00000-baby.png",
+        image_path=image_path,
+        image_size=image_size,
+        scale_factor=scale_factor,
+        noise_sigma=noise_sigma,
+        device=device,
+        get_operator_fn=get_operator,
+        get_noise_fn=get_noise,
+    )
+
+    img_prompt_outputs = prepare_super_resolution_measurement(
+        image_path=prompt_image_path,
         image_size=image_size,
         scale_factor=scale_factor,
         noise_sigma=noise_sigma,
@@ -123,29 +405,36 @@ def super_resolution_task(config_name: str) -> None:
             guidance_scale=guidance_scale,
             device=device,
         )
-        gradient_clipping_value = 0.1
+        gradient_clipping_value = 0.005
+        print(sd3_pipeline.scheduler.config)
 
     elif ode_solver == "euler":
         sd3_pipeline = StableDiffusion3BaseV2(
             model_key="stabilityai/stable-diffusion-3-medium-diffusers",
-            scheduler=FlowMatchEulerDiscreteScheduler(),
+            scheduler=FlowMatchEulerDiscreteScheduler(
+                shift=shift
+                # use_dynamic_shifting=True,
+                # base_shift=10.0,
+                # max_shift=0.80,
+                # use_karras_sigmas=True,
+            ),
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             device=device,
         )
-        gradient_clipping_value = 0.005
+        gradient_clipping_value = 0.006
 
-    prompt = """
-        A close-up portrait of a baby with soft skin, short dark hair,
-        and calm expression, wearing a green onesie, resting against
-        a turquoise cushion.
-    """
+    # prompt = """
+    #     A close-up portrait of a baby with soft skin, short dark hair,
+    #     and calm expression, wearing a green onesie, resting against
+    #     a turquoise cushion
+    # """
 
-    prompt_2 = """
-        Ultra-realistic portrait, natural lighting, soft shadows,
-        sharp facial features, high-resolution skin texture,
-        lifelike color tones, DSLR photo.
-    """
+    # prompt_2 = """
+    #     Portrait of a male, natural lighting, soft shadows,
+    #     sharp facial features, high-resolution skin texture,
+    #     lifelike color tones, DSLR photo
+    # """
 
     # Get prompt and pooled embeds
     prompt_embeds, pooled_prompt_embeds = sd3_pipeline.encode_prompts(
@@ -155,7 +444,9 @@ def super_resolution_task(config_name: str) -> None:
 
     # Collect timesteps and sigmas
     print(sd3_pipeline.scheduler.sigmas)
-    timesteps, sigmas, _ = sd3_pipeline.retrieve_timesteps_and_sigmas(strength=strength)
+    timesteps, sigmas, _ = sd3_pipeline.retrieve_timesteps_and_sigmas(
+        strength=strength, height=image_size, width=image_size
+    )
 
     # We need to pass a step index for Heun 2
     sd3_pipeline.scheduler._init_step_index(timesteps[0])
@@ -198,7 +489,14 @@ def super_resolution_task(config_name: str) -> None:
         # Encoder expects images in -1 to 1 so just clamp to make sure
         # this is true
         img_to_encode = torch.clamp(img_to_encode, -1.0, 1.0)
+
+        # Not working the way I expected it to. I thought it would
+        # help keep the training on the image manifold but it does
+        # not stay there
+        # img_to_encode = img_prompt_outputs["ref_img"]
+
         latents = sd3_pipeline.vae.encode(img_to_encode).latent_dist.sample()
+        # latents = sd3_pipeline.vae.encode(img_to_encode).latents
 
         # Then we scale and shift the encoding
         latents = (
@@ -227,33 +525,83 @@ def super_resolution_task(config_name: str) -> None:
     initial_z_max = z.max()
     initial_z_mean = z.mean()
 
+    # model = ChannelExpandCompress().to(device)
+    # enc_y_n = sd3_pipeline.vae.encode(y_n).latent_dist.sample()
+
+    # # Make the decoder blocks trainable
+    # for name, parameters in sd3_pipeline.vae.named_parameters():
+    #     if "up_blocks.3" in name:
+    #         parameters.requires_grad = True
+
+    # for name, parameters in sd3_pipeline.vae.named_parameters():
+    #     if "up_blocks.2" in name:
+    #         parameters.requires_grad = True
+
+    # for name, parameters in sd3_pipeline.vae.named_parameters():
+    #     if "up_blocks.1" in name:
+    #         parameters.requires_grad = True
+
+    # for name, parameters in sd3_pipeline.vae.named_parameters():
+    #     if "up_blocks.0" in name:
+    #         parameters.requires_grad = True
+
+    # We can initialize the new timesteps and sigmas here
+    print(sigmas, len(sigmas))
+    print(timesteps, len(timesteps))
+    # stdlib
+    mono = MonotoneTimesteps(sigmas, learn_endpoints=True).to(device)
+    mono.train()
+
     optimizer = torch.optim.Adam(
         [
             {"params": [z], "lr": lr},
+            {"params": mono.parameters(), "lr": 1e-2},
+            # {"params": sd3_pipeline.vae.decoder.up_blocks[-1].parameters(), "lr": 1e-4},  # noqa
+            # {"params": sd3_pipeline.vae.decoder.up_blocks[-2].parameters(), "lr": 1e-5},  # noqa
+            # {"params": sd3_pipeline.vae.decoder.up_blocks[1].parameters(), "lr": 1e-5},  # noqa
         ]
     )
+
+    # optimizer = torch.optim.Adam(
+    #     [{"params": [z], "lr": lr}]
+    #     #  {"params": model.parameters(), "lr": lr}]
+    # )
 
     # Export the measurment operator
     operator = img_outputs["operator"]
 
     # Create the loss function
     criterion = torch.nn.L1Loss()
+    criterion_mc = MultiChannelLoss()
     lpips_loss_fn = lpips.LPIPS(net="vgg").to(device)
 
     # Try the grad scaler for fp16
-    scaler = torch.amp.GradScaler()
+    # scaler = torch.amp.GradScaler()
 
     start = time.time()
     for idx, epoch in tqdm.tqdm(enumerate(range(epochs))):
-        torch.compiler.cudagraph_mark_step_begin()
+        # # stdlib
+        sigmas = mono()
+        timesteps = sigmas * 1000.0
+
+        # Filter timesteps here
+        init_timestep = min(num_inference_steps * strength, num_inference_steps)
+        t_start = int(max(num_inference_steps - init_timestep, 0))
+        timesteps = timesteps[t_start * sd3_pipeline.scheduler.order : -1]
+
+        print(sigmas, len(sigmas))
+        print(timesteps, len(timesteps))
+        # torch.compiler.cudagraph_mark_step_begin()
 
         optimizer.zero_grad()
 
         # The transformer at least expects a zero mean
         # as an input but can handle standard and non-standard
         # gaussian distributions
-        z0 = z - z.mean()
+        z0 = (z - z.mean()) / z.std()
+        # z0 = model(z)
 
+        # with torch.amp.autocast("cuda", dtype=torch.float16):
         if ode_solver == "heun":
             x_t = integrate_heun(
                 f=sd3_pipeline.predict,
@@ -292,22 +640,46 @@ def super_resolution_task(config_name: str) -> None:
         # Now apply the degradation
         operator_decoded_output = operator.forward(decoded_img)  # type: ignore
 
+        # Encoded decoded operator
+        # enc_dec_op = sd3_pipeline.vae.encode(
+        #     operator_decoded_output
+        # ).latent_dist.sample()
+
         # Apply the loss function - this expects [-1, 1]
-        loss = criterion(operator_decoded_output, y_n)
+        loss = criterion(
+            operator_decoded_output, y_n
+        )  # + criterion(enc_dec_op, enc_y_n)
+
+        # + 0.05 * perceptual_loss_fn(
+        #     operator_decoded_output, y_n
+        # )
+
+        # + 0.05 * total_variation_loss(
+        #     decoded_img
+        # )
+        # + 0.05 * gram_matrix_loss(
+        #     operator_decoded_output * 0.5 + 0.5, y_n * 0.5 + 0.5
+        # )
 
         # Update gradients of z
-        scaler.scale(loss).backward()
+        # scaler.scale(loss).backward()
+        loss.backward()
 
         # Unscale gradients before clipping
-        scaler.unscale_(optimizer)
+        # scaler.unscale_(optimizer)
 
         # Clip gradients (example: max norm = 1.0)
         # Found this value to work well for Heun2 - may need to be tuned
         # for euler
-        torch.nn.utils.clip_grad_norm_([z], max_norm=gradient_clipping_value)
+        # if idx <= 10:
+        #     torch.nn.utils.clip_grad_norm_([z], max_norm=0.01)
 
-        scaler.step(optimizer)
-        scaler.update()
+        # else:
+        torch.nn.utils.clip_grad_norm_([z], max_norm=0.005)
+
+        # scaler.step(optimizer)
+        # scaler.update()
+        optimizer.step()
 
         # What is the gradient norm?
         # Compute the grad norm so we can track it
@@ -317,13 +689,17 @@ def super_resolution_task(config_name: str) -> None:
         with torch.no_grad():
             lpips_score = lpips_loss_fn(decoded_img, img_outputs.get("ref_img"))
 
+            # Get the features
+            feats0 = lpips_loss_fn.net.forward(img_outputs.get("ref_img"))
+            feats1 = lpips_loss_fn.net.forward(decoded_img.to(dtype=torch.float32))
+
             decoded_img = decoded_img.squeeze(0)
             model_img = (decoded_img + 1.0) / 2.0  # type: ignore
-            model_img = model_img.squeeze(0).detach().cpu().numpy()  # type: ignore
+            model_img = model_img.squeeze(0).detach().cpu().numpy().astype("float")  # type: ignore
 
             img = img_outputs.get("ref_img")
             img = torch.clamp((img + 1.0) / 2.0, 0.0, 1.0)  # type: ignore
-            img = img.squeeze(0).detach().cpu().numpy()  # type: ignore
+            img = img.squeeze(0).detach().cpu().numpy().astype("float")  # type: ignore
 
             ssim_score = compute_ssim(
                 img,
@@ -358,7 +734,7 @@ def super_resolution_task(config_name: str) -> None:
             # Always log the first image to identify any issues
             # Tracking images during training can also help us understand
             # if we leave the manifold of natural images
-            if idx == 0:
+            if (idx <= 25) or (idx % 100 == 0):
                 fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
 
                 ax1.imshow(img)
@@ -402,6 +778,27 @@ def super_resolution_task(config_name: str) -> None:
     ax3.axis("off")
 
     image_save_path = os.path.join(save_file_path, "final_output.png")
+    fig.tight_layout()
+    fig.savefig(image_save_path, bbox_inches="tight")
+
+    # Get the plots for lpips loss
+    cos_sim_values = cosine_similarity_per_layer(feats0, feats1)
+    lpips_losses = lpips_loss_per_layer(feats0, feats1, lpips_loss_fn)
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Cosine similarity plot
+    ax1.plot(np.arange(len(cos_sim_values)), cos_sim_values.cpu().numpy(), marker="o")
+    ax1.set_title("Cosine Similarity Per LPIPS Layer")
+    ax1.set_xlabel("Layer Index")
+    ax1.set_ylabel("Cosine Similarity")
+
+    ax2.plot(np.arange(len(lpips_losses)), lpips_losses, marker="x", color="r")
+    ax2.set_title("LPIPS Contribution Per Layer")
+    ax2.set_xlabel("Layer Index")
+    ax2.set_ylabel("Layerwise LPIPS Loss")
+
+    image_save_path = os.path.join(save_file_path, "lpips_assessment.png")
     fig.tight_layout()
     fig.savefig(image_save_path, bbox_inches="tight")
 

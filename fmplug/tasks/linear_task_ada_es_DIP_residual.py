@@ -2,37 +2,37 @@
 import glob
 import inspect
 import os
+import pickle
 import random
 import time
 from typing import List, Optional, Union
 
 # third party
+import cv2
+import lpips
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import torch
-from torch.utils.checkpoint import checkpoint
 import tqdm
 import wandb
 import yaml  # type: ignore
-from diffusers import StableDiffusion3Pipeline, StableDiffusion3Img2ImgPipeline
+from diffusers import StableDiffusion3Img2ImgPipeline, StableDiffusion3Pipeline
 from huggingface_hub import login
 from PIL import Image
 from skimage.metrics import peak_signal_noise_ratio
+from torch.utils.checkpoint import checkpoint
 from torchvision import transforms
-import pickle
+
 # first party
-from fmplug.losses.losses import PerceptualLossV3
-import lpips
-from fmplug.utils.measurements import get_noise, get_operator
-from fmplug.utils.tv_norm import tv_lp_loss
-from fmplug.utils.image_utils import Blurkernel, generate_tilt_map, mask_generator
-from fmplug.utils.var_es import VarianceEarlyStopping
-from fmplug.dip_module.UNet import UNet
 from fmplug.dip_module.Siren import Siren, get_mgrid
 from fmplug.dip_module.skip import skip
-
-import pandas as pd
-import cv2
+from fmplug.dip_module.UNet import UNet
+from fmplug.losses.losses import PerceptualLossV3
+from fmplug.utils.image_utils import Blurkernel, generate_tilt_map, mask_generator
+from fmplug.utils.measurements import get_noise, get_operator
+from fmplug.utils.tv_norm import tv_lp_loss
+from fmplug.utils.var_es import VarianceEarlyStopping
 
 with open('poly13_model_var.pkl', 'rb') as f:
     reg = pickle.load(f)
@@ -48,6 +48,7 @@ PROJECT_NAME = "FMPlug-Ada-ES-SIREN-Residual"
 # Enable wandb
 print("Initialize Project ...")
 wandb.login(key=API_KEY)  # type: ignore
+
 
 def set_seed(seed):
     """
@@ -78,7 +79,10 @@ def save_png_cv2(array, path):
 
     cv2.imwrite(path, array)
 
-def visualize_image(ref: np.array, y_n: np.array, output: np.array, save_file_name: str) -> None:
+
+def visualize_image(
+    ref: np.array, y_n: np.array, output: np.array, save_file_name: str
+) -> None:
     # Create a figure with 1 row, 3 columns
     fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(10, 10))
 
@@ -111,6 +115,7 @@ def visualize_image(ref: np.array, y_n: np.array, output: np.array, save_file_na
     )
     plt.close()
 
+
 def normalize_latent(z_x: torch.Tensor, t_x: float):
     """
     Normalize z_x at time t_x using interpolated mean and variance per channel.
@@ -132,7 +137,7 @@ def integrate(
     pooled_embedding,
     device,
     guidance_scale: float = 7.0,
-    method: str = "heun2"
+    method: str = "heun2",
 ):
     do_classifier_free_guidance = guidance_scale > 1.0
     # print("t: ", t)
@@ -141,15 +146,15 @@ def integrate(
     temp_t = 1000 * torch.sigmoid(12.0 * t - 6.0)
     # print("temp_t: ", temp_t)
     delta_t = temp_t / NFE
-    temp_t_next = temp_t - delta_t 
-    
+    temp_t_next = temp_t - delta_t
+
     sigma = temp_t / 1000
     sigma_next = temp_t_next / 1000
     zt = z
     zt = normalize_latent(zt, temp_t)
 
     for i in range(NFE):
-        
+
         latent_model_input = torch.cat([zt] * 2) if do_classifier_free_guidance else zt
         time_step = temp_t.expand(latent_model_input.shape[0])
         time_step_next = temp_t_next.expand(latent_model_input.shape[0])
@@ -238,10 +243,10 @@ def integrate(
 
         # Update step for huen2
         zt = zt + noise_pred
-        
-        temp_t = temp_t - delta_t 
-        temp_t_next = temp_t - delta_t 
-    
+
+        temp_t = temp_t - delta_t
+        temp_t_next = temp_t - delta_t
+
         sigma = temp_t / 1000
         sigma_next = temp_t_next / 1000
         # print("temp_t: ", temp_t)
@@ -272,7 +277,7 @@ def solve(config_name: str) -> None:
     guidance_scale = fmplug_config["guidance_scale"]
     lr = fmplug_config["lr"]
     lr_t_ada = fmplug_config["lr_t_ada"]
-    decay_factor =  fmplug_config["decay_factor"]
+    decay_factor = fmplug_config["decay_factor"]
     epochs = fmplug_config["epochs"]
     loss_multiplier = fmplug_config["loss_multiplier"]
     loss_fn = fmplug_config["loss_fn"]
@@ -282,12 +287,12 @@ def solve(config_name: str) -> None:
     t_end = fmplug_config["t_end"]
     data_type = eval(fmplug_config["data_type"])
     optimizer_select = fmplug_config["optimizer_select"]
-    
+
     es_window_size = fmplug_config["es_window_size"]
     es_patience = fmplug_config["es_patience"]
-    es_min_epochs  = fmplug_config["es_min_epochs"]
-    es_delta  = fmplug_config["es_delta"]
-    
+    es_min_epochs = fmplug_config["es_min_epochs"]
+    es_delta = fmplug_config["es_delta"]
+
     dip_in_channel = fmplug_config["dip_in_channel"]
     dip_out_channel = fmplug_config["dip_out_channel"]
     dip_num_channels_down = fmplug_config["dip_num_channels_down"]
@@ -302,48 +307,50 @@ def solve(config_name: str) -> None:
     dip_pad = fmplug_config["dip_pad"]
     dip_act_fun = fmplug_config["dip_act_fun"]
     dip_lr = fmplug_config["dip_lr"]
-    
+
     siren_in_features = fmplug_config["siren_in_features"]
     siren_hidden_features = fmplug_config["siren_hidden_features"]
     siren_out_features = fmplug_config["siren_out_features"]
     siren_hidden_layers = fmplug_config["siren_hidden_layers"]
     siren_outermost_linear = fmplug_config["siren_outermost_linear"]
-    
+
     target_norm = fmplug_config["target_norm"]
-    
+
     measure_config = config_all['measurement']
     task = measure_config["operator"]["name"]
 
     gt_pattern = os.path.join(data_folder, task, "*", "*", "gt.png")
     gt_paths = sorted(glob.glob(gt_pattern))
-    
+
     wandb_instance = wandb.init(  # type: ignore
-            # set the wandb project where this run will be logged
-            project=PROJECT_NAME,
-            tags=["Experimental", task],
-            config={
-                "method": method,
-                "optimizer": optimizer_select,
-                "lr": lr,
-                "lr_t_ada": lr_t_ada,
-                "decay_factor": decay_factor,
-                "epochs": epochs,
-                "loss_multiplier": loss_multiplier,
-                "image_size": image_size,
-                "scale_factor": scale_factor,
-                "NFE": NFE,
-                "guidance_scale": guidance_scale,
-                "loss_fn": loss_fn,
-                "vae_weight": vae_weight,
-                "lpips_weight": lpips_weight,
-                "TV_reg_weight": TV_reg_weight,
-                "t_end": t_end,
-                "data_type": data_type
-            },
-        )
-    
-    save_dir = os.path.join(save_folder, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
-    
+        # set the wandb project where this run will be logged
+        project=PROJECT_NAME,
+        tags=["Experimental", task],
+        config={
+            "method": method,
+            "optimizer": optimizer_select,
+            "lr": lr,
+            "lr_t_ada": lr_t_ada,
+            "decay_factor": decay_factor,
+            "epochs": epochs,
+            "loss_multiplier": loss_multiplier,
+            "image_size": image_size,
+            "scale_factor": scale_factor,
+            "NFE": NFE,
+            "guidance_scale": guidance_scale,
+            "loss_fn": loss_fn,
+            "vae_weight": vae_weight,
+            "lpips_weight": lpips_weight,
+            "TV_reg_weight": TV_reg_weight,
+            "t_end": t_end,
+            "data_type": data_type,
+        },
+    )
+
+    save_dir = os.path.join(
+        save_folder, time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    )
+
     for gt_path in gt_paths:
         base_dir = os.path.dirname(gt_path)
         prompt_path = os.path.join(base_dir, "prompt.txt")
@@ -355,7 +362,9 @@ def solve(config_name: str) -> None:
             # Get relative path starting from `task`
             rel_path = os.path.relpath(gt_path, start=data_folder)
 
-            rel_dir = os.path.dirname(rel_path)  # gives: task/some_folder/another_folder
+            rel_dir = os.path.dirname(
+                rel_path
+            )  # gives: task/some_folder/another_folder
 
         else:
             print(f"Warning: prompt.txt not found for {gt_path}")
@@ -379,31 +388,38 @@ def solve(config_name: str) -> None:
         # Forward measurement model (A(x) + n)
         operator = get_operator(device=device, **measure_config['operator'])
         noiser = get_noise(**measure_config['noise'])
-        
+
         with torch.amp.autocast("cuda", dtype=data_type):
             if measure_config['operator']['name'] == 'inpainting':
                 mask_gen = mask_generator(**measure_config['mask_opt'])
                 mask = mask_gen(ref_img)[:, 0, :, :].unsqueeze(0)
                 y = operator.forward(ref_img, mask=mask)
                 y_n = noiser(y)
-            elif measure_config['operator']['name'] == 'motion_blur' or measure_config['operator']['name'] == 'gaussian_blur':
+            elif (
+                measure_config['operator']['name'] == 'motion_blur'
+                or measure_config['operator']['name'] == 'gaussian_blur'
+            ):
                 y = operator.forward(ref_img)
                 y_n = noiser(y)
                 kernel = operator.get_kernel()
             elif measure_config['operator']['name'] == 'turbulence':
                 kernel_size = measure_config['kernel_opt']["kernel_size"]
                 intensity = measure_config['kernel_opt']["intensity"]
-                conv = Blurkernel('gaussian', kernel_size=kernel_size, device=device, std=intensity)
+                conv = Blurkernel(
+                    'gaussian', kernel_size=kernel_size, device=device, std=intensity
+                )
                 kernel = conv.get_kernel().type(torch.float32)
                 kernel = kernel.to(device).view(1, 1, kernel_size, kernel_size)
-                tilt = generate_tilt_map(img_h=image_size, img_w=image_size, kernel_size=7, device=device)
+                tilt = generate_tilt_map(
+                    img_h=image_size, img_w=image_size, kernel_size=7, device=device
+                )
                 tilt = torch.clip(tilt, -2.5, 2.5)
-                y = operator.forward(ref_img,kernel, tilt)
+                y = operator.forward(ref_img, kernel, tilt)
                 y_n = noiser(y)
             else:
                 y = operator.forward(ref_img)
                 y_n = noiser(y)
-        
+
         os.makedirs(os.path.join(save_dir, rel_dir), exist_ok=True)
 
         print("Load in SD3 image to image model ...")
@@ -480,37 +496,54 @@ def solve(config_name: str) -> None:
         pooled_embedding = torch.cat(
             [negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0
         )
-            
+
         del pipe
         del prompt_encoder
         torch.cuda.empty_cache()
 
-        
         # Current memory usage by tensors (in MB)
-        print("Model Load Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
-        print("Model Load Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB")
+        print(
+            "Model Load Allocated:",
+            round(torch.cuda.memory_allocated(0) / 1024**2, 2),
+            "MB",
+        )
+        print(
+            "Model Load Cached:   ",
+            round(torch.cuda.memory_reserved(0) / 1024**2, 2),
+            "MB",
+        )
 
-        
         def encode(image: torch.Tensor) -> torch.Tensor:
             z = vae.encode(image).latent_dist.sample()
-            z = (z-vae.config.shift_factor) * vae.config.scaling_factor
+            z = (z - vae.config.shift_factor) * vae.config.scaling_factor
             return z
 
         def decode(z: torch.Tensor) -> torch.Tensor:
-            z = (z/vae.config.scaling_factor) + vae.config.shift_factor
+            z = (z / vae.config.scaling_factor) + vae.config.shift_factor
             return vae.decode(z, return_dict=False)[0]
-        
-        early_stop_indicator = VarianceEarlyStopping(es_window_size, es_patience, es_min_epochs, es_delta)
+
+        early_stop_indicator = VarianceEarlyStopping(
+            es_window_size, es_patience, es_min_epochs, es_delta
+        )
 
         # initialize latent
-        
+
         y_n = y_n.detach().to(device).to(data_type)
-        y_n_numpy = y_n.squeeze(0).detach().cpu().to(torch.float32).permute(1, 2, 0).numpy()
+        y_n_numpy = (
+            y_n.squeeze(0).detach().cpu().to(torch.float32).permute(1, 2, 0).numpy()
+        )
         y_n_numpy = (y_n_numpy + 1.0) / 2.0
         y_n.requires_grad = False
 
         if "super_resolution" in task:
-            img = y_n.reshape([1, -1, image_size//int(measure_config['operator']['scale_factor']), image_size//int(measure_config['operator']['scale_factor'])])
+            img = y_n.reshape(
+                [
+                    1,
+                    -1,
+                    image_size // int(measure_config['operator']['scale_factor']),
+                    image_size // int(measure_config['operator']['scale_factor']),
+                ]
+            )
             img = transforms.functional.resize(img, [image_size, image_size])
         else:
             img = y_n.reshape([1, -1, image_size, image_size])
@@ -520,41 +553,52 @@ def solve(config_name: str) -> None:
             z = encode(img)
             z = np.sqrt(alpha) * z + np.sqrt(1 - alpha) * torch.randn_like(z)
             z = z.detach()
-        
+
         del img
 
-            
         z = torch.nn.parameter.Parameter(z, True).to(device)
         z = z.requires_grad_(True)
         # t_ada = torch.tensor(12.0 * (1.0 - alpha) - 6.0).to(device)
         t_ada = torch.tensor(1.0 - alpha).to(device)
         t_ada = t_ada.requires_grad_(True)
-        
-        img_z = torch.randn(1, dip_in_channel, image_size, image_size, device=device, dtype=data_type).to(device).requires_grad_(False)
-        img_rep = skip(  
-                        num_input_channels=dip_in_channel,
-                        num_output_channels=dip_out_channel,
-                        num_channels_down=dip_num_channels_down,
-                        num_channels_up=dip_num_channels_up,
-                        num_channels_skip=dip_num_channels_skip,
-                        filter_size_down=dip_filter_size_down,
-                        filter_size_up=dip_filter_size_up,
-                        filter_skip_size=dip_filter_skip_size,
-                        upsample_mode=dip_upsample_mode,
-                        need_sigmoid=dip_need_sigmoid, 
-                        need_bias=dip_need_bias, 
-                        pad=dip_pad, 
-                        act_fun=dip_act_fun).to(device)
+
+        img_z = (
+            torch.randn(
+                1,
+                dip_in_channel,
+                image_size,
+                image_size,
+                device=device,
+                dtype=data_type,
+            )
+            .to(device)
+            .requires_grad_(False)
+        )
+        img_rep = skip(
+            num_input_channels=dip_in_channel,
+            num_output_channels=dip_out_channel,
+            num_channels_down=dip_num_channels_down,
+            num_channels_up=dip_num_channels_up,
+            num_channels_skip=dip_num_channels_skip,
+            filter_size_down=dip_filter_size_down,
+            filter_size_up=dip_filter_size_up,
+            filter_skip_size=dip_filter_skip_size,
+            upsample_mode=dip_upsample_mode,
+            need_sigmoid=dip_need_sigmoid,
+            need_bias=dip_need_bias,
+            pad=dip_pad,
+            act_fun=dip_act_fun,
+        ).to(device)
         # img_z = get_mgrid([1, 3, image_size, image_size]).to(device)
         # img_rep = Siren(
-        #                 in_features=siren_in_features, 
-        #                 hidden_features=siren_hidden_features, 
-        #                 out_features=siren_out_features, 
-        #                 hidden_layers=siren_hidden_layers, 
+        #                 in_features=siren_in_features,
+        #                 hidden_features=siren_hidden_features,
+        #                 out_features=siren_out_features,
+        #                 hidden_layers=siren_hidden_layers,
         #                 outermost_linear=siren_outermost_linear).to(device)
 
         # amplitude = torch.tensor(torch.pi).to(dtype=data_type, device=device)
-        
+
         # Solve the ODE
         print("Solve inverse problem ...")
 
@@ -581,7 +625,7 @@ def solve(config_name: str) -> None:
                 pooled_embedding,
                 device,
                 guidance_scale=guidance_scale,
-                method=method
+                method=method,
             )
 
         # Criterion for learning
@@ -597,10 +641,10 @@ def solve(config_name: str) -> None:
         lpips_loss_fn = lpips.LPIPS(net='vgg').to(device)
         # style_loss_fn = StyleLoss(layers=["relu1_2"]).to(device)
         # fft_loss_fn = FFTLoss()
-        
-        L1_tv = tv_lp_loss(pow = 1)
-        L2_tv = tv_lp_loss(pow = 2)
-        
+
+        L1_tv = tv_lp_loss(pow=1)
+        L2_tv = tv_lp_loss(pow=2)
+
         if optimizer_select == "adam":
             params_group1 = {'params': z, 'lr': lr}
             params_group2 = {'params': t_ada, 'lr': lr_t_ada}
@@ -608,19 +652,34 @@ def solve(config_name: str) -> None:
             optimizer = torch.optim.AdamW([params_group1, params_group2, params_group3])
             dip_optimizer = torch.optim.AdamW(img_rep.parameters(), lr=dip_lr)
         elif optimizer_select == "lbfgs":
-            optimizer_z = torch.optim.LBFGS([z], lr=lr, max_iter=50, history_size=50, line_search_fn="strong_wolfe")
-            optimizer_t = torch.optim.LBFGS([t_ada], lr=lr_t_ada, max_iter=50, history_size=50, line_search_fn="strong_wolfe")
-        
+            optimizer_z = torch.optim.LBFGS(
+                [z], lr=lr, max_iter=50, history_size=50, line_search_fn="strong_wolfe"
+            )
+            optimizer_t = torch.optim.LBFGS(
+                [t_ada],
+                lr=lr_t_ada,
+                max_iter=50,
+                history_size=50,
+                line_search_fn="strong_wolfe",
+            )
 
         psnrs = []
         losses = []
         best_images = []
-        
+
         # Current memory usage by tensors (in MB)
-        print("Init Opt Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
-        print("Init Opt Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB")
+        print(
+            "Init Opt Allocated:",
+            round(torch.cuda.memory_allocated(0) / 1024**2, 2),
+            "MB",
+        )
+        print(
+            "Init Opt Cached:   ",
+            round(torch.cuda.memory_reserved(0) / 1024**2, 2),
+            "MB",
+        )
         decoded_output = None
-        
+
         def closure():
             nonlocal decoded_output
             optimizer.zero_grad()
@@ -631,18 +690,28 @@ def solve(config_name: str) -> None:
                 decoded_output = torch.sin(vae.decode(x_t).sample)
 
                 if measure_config['operator']['name'] == 'inpainting':
-                    operator_decoded_output = operator.forward(decoded_output, mask=mask)
+                    operator_decoded_output = operator.forward(
+                        decoded_output, mask=mask
+                    )
                 else:
                     operator_decoded_output = operator.forward(decoded_output)
 
                 loss = criterion(operator_decoded_output, y_n)
                 # encoded = vae.encode(decoded_output).latent_dist.sample()
                 loss += vae_weight * (x_t**2 / 2).mean()
-                loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
+                loss += lpips_weight * percep_loss_fn(
+                    (operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0
+                )
                 # loss += lpips_weight * lpips_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0).mean()
-                loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
+                loss += (
+                    TV_reg_weight
+                    * L1_tv(decoded_output)
+                    / L2_tv(decoded_output)
+                    / decoded_output.numel()
+                    / 2.0
+                )
                 loss *= loss_multiplier
-            
+
             loss = loss.float()
             loss.backward()
             # scaler.scale(loss).backward()
@@ -652,7 +721,7 @@ def solve(config_name: str) -> None:
             # print("gradient z: ", z.grad.min(), z.grad.max())
 
             return loss
-        
+
         def mix_closure():
             nonlocal decoded_output
             optimizer.zero_grad()
@@ -662,21 +731,39 @@ def solve(config_name: str) -> None:
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
                 decoded_output = torch.sin(vae.decode(x_t).sample)
                 img_residual = torch.tanh(img_rep(img_z).reshape(decoded_output.shape))
-                img_residual = img_residual / torch.sqrt(img_residual.sum()/target_norm)
-                
+                img_residual = img_residual / torch.sqrt(
+                    img_residual.sum() / target_norm
+                )
+
                 if measure_config['operator']['name'] == 'inpainting':
-                    operator_decoded_output = operator.forward(decoded_output, mask=mask)
-                    operator_residual_output = operator.forward(decoded_output.detach() + img_residual, mask=mask)
+                    operator_decoded_output = operator.forward(
+                        decoded_output, mask=mask
+                    )
+                    operator_residual_output = operator.forward(
+                        decoded_output.detach() + img_residual, mask=mask
+                    )
                 else:
                     operator_decoded_output = operator.forward(decoded_output)
-                    operator_residual_output = operator.forward(decoded_output.detach() + img_residual)
+                    operator_residual_output = operator.forward(
+                        decoded_output.detach() + img_residual
+                    )
 
-                loss = criterion(operator_decoded_output, y_n) + criterion(operator_residual_output, y_n)
+                loss = criterion(operator_decoded_output, y_n) + criterion(
+                    operator_residual_output, y_n
+                )
                 loss += vae_weight * (x_t**2 / 2).mean()
-                loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
-                loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
+                loss += lpips_weight * percep_loss_fn(
+                    (operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0
+                )
+                loss += (
+                    TV_reg_weight
+                    * L1_tv(decoded_output)
+                    / L2_tv(decoded_output)
+                    / decoded_output.numel()
+                    / 2.0
+                )
                 loss *= loss_multiplier
-            
+
             loss = loss.float()
             loss.backward()
             # scaler.scale(loss).backward()
@@ -686,7 +773,7 @@ def solve(config_name: str) -> None:
             # print("gradient z: ", z.grad.min(), z.grad.max())
 
             return loss
-        
+
         def dip_closure():
             nonlocal decoded_output
             optimizer.zero_grad()
@@ -695,22 +782,42 @@ def solve(config_name: str) -> None:
                 x_t = checkpoint(checkpointed_integrate, z.detach(), t_ada.detach())
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
                 decoded_output = torch.sin(vae.decode(x_t).sample)
-                img_residual = torch.tanh(img_rep(img_z).reshape(decoded_output.shape)) * 0.1
-                img_residual = img_residual / torch.sqrt(img_residual.sum()/target_norm)
+                img_residual = (
+                    torch.tanh(img_rep(img_z).reshape(decoded_output.shape)) * 0.1
+                )
+                img_residual = img_residual / torch.sqrt(
+                    img_residual.sum() / target_norm
+                )
 
                 if measure_config['operator']['name'] == 'inpainting':
-                    operator_decoded_output = operator.forward(decoded_output, mask=mask).detach()
-                    operator_residual_output = operator.forward(decoded_output.detach() + img_residual, mask=mask)
+                    operator_decoded_output = operator.forward(
+                        decoded_output, mask=mask
+                    ).detach()
+                    operator_residual_output = operator.forward(
+                        decoded_output.detach() + img_residual, mask=mask
+                    )
                 else:
                     operator_decoded_output = operator.forward(decoded_output).detach()
-                    operator_residual_output = operator.forward(decoded_output.detach() + img_residual)
+                    operator_residual_output = operator.forward(
+                        decoded_output.detach() + img_residual
+                    )
 
-                loss = criterion(operator_decoded_output, y_n) + criterion(operator_residual_output, y_n)
+                loss = criterion(operator_decoded_output, y_n) + criterion(
+                    operator_residual_output, y_n
+                )
                 loss += vae_weight * (x_t**2 / 2).mean()
-                loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
-                loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
+                loss += lpips_weight * percep_loss_fn(
+                    (operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0
+                )
+                loss += (
+                    TV_reg_weight
+                    * L1_tv(decoded_output)
+                    / L2_tv(decoded_output)
+                    / decoded_output.numel()
+                    / 2.0
+                )
                 loss *= loss_multiplier
-            
+
             loss = loss.float()
             loss.backward()
             # scaler.scale(loss).backward()
@@ -720,7 +827,6 @@ def solve(config_name: str) -> None:
             # print("gradient z: ", z.grad.min(), z.grad.max())
 
             return loss
-
 
         def closure_z():
             nonlocal decoded_output
@@ -732,16 +838,26 @@ def solve(config_name: str) -> None:
                 decoded_output = torch.sin(vae.decode(x_t).sample)
 
                 if measure_config['operator']['name'] == 'inpainting':
-                    operator_decoded_output = operator.forward(decoded_output, mask=mask)
+                    operator_decoded_output = operator.forward(
+                        decoded_output, mask=mask
+                    )
                 else:
                     operator_decoded_output = operator.forward(decoded_output)
 
                 loss = criterion(operator_decoded_output, y_n)
                 loss += vae_weight * (x_t**2 / 2).mean()
-                loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
-                loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
+                loss += lpips_weight * percep_loss_fn(
+                    (operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0
+                )
+                loss += (
+                    TV_reg_weight
+                    * L1_tv(decoded_output)
+                    / L2_tv(decoded_output)
+                    / decoded_output.numel()
+                    / 2.0
+                )
                 loss *= loss_multiplier
-            
+
             loss = loss.float()
             scaler.scale(loss).backward()
             # Report peak memory used in MB
@@ -750,7 +866,6 @@ def solve(config_name: str) -> None:
             # print("gradient z: ", z.grad.min(), z.grad.max())
 
             return loss
-
 
         def closure_t():
             nonlocal decoded_output
@@ -762,16 +877,26 @@ def solve(config_name: str) -> None:
                 decoded_output = torch.sin(vae.decode(x_t).sample)
 
                 if measure_config['operator']['name'] == 'inpainting':
-                    operator_decoded_output = operator.forward(decoded_output, mask=mask)
+                    operator_decoded_output = operator.forward(
+                        decoded_output, mask=mask
+                    )
                 else:
                     operator_decoded_output = operator.forward(decoded_output)
 
                 loss = criterion(operator_decoded_output, y_n)
                 loss += vae_weight * (x_t**2 / 2).mean()
-                loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
-                loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
+                loss += lpips_weight * percep_loss_fn(
+                    (operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0
+                )
+                loss += (
+                    TV_reg_weight
+                    * L1_tv(decoded_output)
+                    / L2_tv(decoded_output)
+                    / decoded_output.numel()
+                    / 2.0
+                )
                 loss *= loss_multiplier
-            
+
             loss = loss.float()
             scaler.scale(loss).backward()
             # Report peak memory used in MB
@@ -781,7 +906,6 @@ def solve(config_name: str) -> None:
 
             return loss
 
-        
         for iterator in tqdm.tqdm(range(epochs)):
             # print("Iter: ", iterator)
             if optimizer_select == "adam":
@@ -789,9 +913,9 @@ def solve(config_name: str) -> None:
                     for _ in range(20):
                         loss = dip_optimizer.step(dip_closure)
                     loss = optimizer.step(mix_closure)
-                    
+
                 loss = optimizer.step(closure)
-                new_lr = lr_t_ada * (decay_factor ** iterator)
+                new_lr = lr_t_ada * (decay_factor**iterator)
                 optimizer.param_groups[1]['lr'] = new_lr
             elif optimizer_select == "lbfgs":
                 _ = optimizer_z.step(closure_z)
@@ -799,11 +923,11 @@ def solve(config_name: str) -> None:
             # scheduler.step()
 
             losses.append(loss.item())
-            
+
             # print("Opt Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
             # print("Opt Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB")
             torch.cuda.empty_cache()
-            
+
             # Evaluate
             with torch.no_grad():
                 output = decoded_output.detach().float()
@@ -814,9 +938,7 @@ def solve(config_name: str) -> None:
                 )  # Keep out for now lets evaluate
 
                 # calculate psnr
-                tmp_psnr = peak_signal_noise_ratio(
-                    ref_numpy, output_numpy
-                )
+                tmp_psnr = peak_signal_noise_ratio(ref_numpy, output_numpy)
                 # print(tmp_psnr)
 
                 # calculate mse
@@ -825,7 +947,7 @@ def solve(config_name: str) -> None:
                 metrics_to_log = {
                     "epoch": iterator,
                     "t_ada": 1000 * torch.sigmoid(12.0 * t_ada - 6.0).item(),
-                    "loss": loss.item()/loss_multiplier,
+                    "loss": loss.item() / loss_multiplier,
                     "psnr": tmp_psnr,
                     "lpips": lpips_score.item(),
                     "mse_loss": mse_score,
@@ -834,11 +956,13 @@ def solve(config_name: str) -> None:
 
                 psnrs.append(tmp_psnr)
 
-                if len(psnrs) == 1 or (len(psnrs) > 1 and tmp_psnr > np.max(psnrs[:-1])):
+                if len(psnrs) == 1 or (
+                    len(psnrs) > 1 and tmp_psnr > np.max(psnrs[:-1])
+                ):
                     best_img = output_numpy.astype(float)
                     best_images.append(best_img)
                     best_epoch = iterator
-                
+
                 df_new = pd.DataFrame([metrics_to_log])
                 # Append or create
                 log_path = os.path.join(save_dir, rel_dir, "history.csv")
@@ -846,7 +970,7 @@ def solve(config_name: str) -> None:
                     df_new.to_csv(log_path, mode='a', header=False, index=False)
                 else:
                     df_new.to_csv(log_path, mode='w', header=True, index=False)
-                
+
                 if early_stop_indicator.get_flag() == False:
                     early_stop_indicator.update(loss.item(), output_numpy)
                 else:
@@ -855,27 +979,72 @@ def solve(config_name: str) -> None:
 
                     es_image = early_stop_indicator.get_images()[min_index]
 
-                    visualize_image(ref_numpy, y_n_numpy, best_img, os.path.join(save_dir, rel_dir, f"img_diff_es_{str(iterator-es_window_size+min_index)}.png"))
-                    np.save(os.path.join(save_dir, rel_dir, f"reconstruction_es_{str(iterator-es_window_size+min_index)}.npy"), es_image)
-                    save_png_cv2(es_image, os.path.join(save_dir, rel_dir, f"reconstruction_es_{str(iterator-es_window_size+min_index)}.png"))
+                    visualize_image(
+                        ref_numpy,
+                        y_n_numpy,
+                        best_img,
+                        os.path.join(
+                            save_dir,
+                            rel_dir,
+                            f"img_diff_es_{str(iterator-es_window_size+min_index)}.png",
+                        ),
+                    )
+                    np.save(
+                        os.path.join(
+                            save_dir,
+                            rel_dir,
+                            f"reconstruction_es_{str(iterator-es_window_size+min_index)}.npy",
+                        ),
+                        es_image,
+                    )
+                    save_png_cv2(
+                        es_image,
+                        os.path.join(
+                            save_dir,
+                            rel_dir,
+                            f"reconstruction_es_{str(iterator-es_window_size+min_index)}.png",
+                        ),
+                    )
                     break
 
+        visualize_image(
+            ref_numpy,
+            y_n_numpy,
+            best_img,
+            os.path.join(save_dir, rel_dir, f"img_diff_best.png"),
+        )
+        visualize_image(
+            ref_numpy,
+            y_n_numpy,
+            output_numpy,
+            os.path.join(save_dir, rel_dir, f"img_diff_last.png"),
+        )
 
-        visualize_image(ref_numpy, y_n_numpy, best_img, os.path.join(save_dir, rel_dir, f"img_diff_best.png"))
-        visualize_image(ref_numpy, y_n_numpy, output_numpy, os.path.join(save_dir, rel_dir, f"img_diff_last.png"))
-        
         # Save the raw data as well
         np.save(os.path.join(save_dir, rel_dir, "gt.npy"), ref_numpy)
         np.save(os.path.join(save_dir, rel_dir, "measurement.npy"), y_n_numpy)
-        np.save(os.path.join(save_dir, rel_dir, f"reconstruction_best_{str(best_epoch)}.npy"), best_img)
-        np.save(os.path.join(save_dir, rel_dir, f"reconstruction_last.npy"), output_numpy)
-        
+        np.save(
+            os.path.join(
+                save_dir, rel_dir, f"reconstruction_best_{str(best_epoch)}.npy"
+            ),
+            best_img,
+        )
+        np.save(
+            os.path.join(save_dir, rel_dir, f"reconstruction_last.npy"), output_numpy
+        )
+
         save_png_cv2(ref_numpy, os.path.join(save_dir, rel_dir, "gt.png"))
         save_png_cv2(y_n_numpy, os.path.join(save_dir, rel_dir, "measurement.png"))
-        save_png_cv2(best_img, os.path.join(save_dir, rel_dir, f"reconstruction_best_{str(best_epoch)}.png"))
-        save_png_cv2(output_numpy, os.path.join(save_dir, rel_dir, f"reconstruction_last.png"))
-        
-        
+        save_png_cv2(
+            best_img,
+            os.path.join(
+                save_dir, rel_dir, f"reconstruction_best_{str(best_epoch)}.png"
+            ),
+        )
+        save_png_cv2(
+            output_numpy, os.path.join(save_dir, rel_dir, f"reconstruction_last.png")
+        )
+
         with open(os.path.join(save_dir, rel_dir, "prompt.txt"), "w") as file:
             file.write(prompt)
 

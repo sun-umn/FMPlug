@@ -1,4 +1,6 @@
+# third party
 import numpy as np
+
 
 class VarianceEarlyStopping:
     def __init__(self, window_size=10, patience=5, min_epochs=0, delta=1e-6):
@@ -26,7 +28,7 @@ class VarianceEarlyStopping:
         """
         Args:
             loss_value (float): The current loss (e.g., per epoch).
-        
+
         Returns:
             bool: True if early stopping condition is met, False otherwise.
         """
@@ -49,7 +51,9 @@ class VarianceEarlyStopping:
         # Check mean trend of variance
         if self.epoch_count >= self.min_epochs:
             current_mean_var = np.mean(self.variance_history)
-            print(f"Epoch {self.epoch_count}: Current Mean Variance = {current_mean_var:.8f}")
+            print(
+                f"Epoch {self.epoch_count}: Current Mean Variance = {current_mean_var:.8f}"
+            )
             if self.best_mean_variance - current_mean_var > self.delta:
                 # Significant decrease
                 self.best_mean_variance = current_mean_var
@@ -80,7 +84,7 @@ class VarianceEarlyStopping:
             list: List of outputs collected during training.
         """
         return self.output_buffer
-    
+
     def get_losses(self):
         """
         Returns the losses collected so far.
@@ -117,7 +121,7 @@ class MeanEarlyStopping:
         """
         Args:
             loss_value (float): The current loss (e.g., per epoch).
-        
+
         Returns:
             bool: True if early stopping condition is met, False otherwise.
         """
@@ -140,7 +144,9 @@ class MeanEarlyStopping:
         # Check mean trend of mean
         if self.epoch_count >= self.min_epochs:
             current_mean_var = np.mean(self.variance_history)
-            print(f"Epoch {self.epoch_count}: Current Avg Mean = {current_mean_var:.8f}")
+            print(
+                f"Epoch {self.epoch_count}: Current Avg Mean = {current_mean_var:.8f}"
+            )
             if self.best_mean_variance - current_mean_var > self.delta:
                 # Significant decrease
                 self.best_mean_variance = current_mean_var
@@ -171,7 +177,7 @@ class MeanEarlyStopping:
             list: List of outputs collected during training.
         """
         return self.output_buffer
-    
+
     def get_losses(self):
         """
         Returns the losses collected so far.

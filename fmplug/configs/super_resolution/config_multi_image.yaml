@@ -1,0 +1,39 @@
+# Multi-Image Super Resolution Configuration
+# Configuration file for multi-image super resolution task with OpenAI VLM prompts
+
+# Image and processing parameters
+image_size: 512
+scale_factor: 4
+num_inference_steps: 10
+guidance_scale: 2.0
+lr: 1.0e-2
+epochs: 10000
+strength: 0.85
+shift: 2.0
+ode_solver: "euler"
+
+# Text prompt for generation (optional - if provided, will use this instead of VLM)
+# Leave empty to use OpenAI VLM for automatic prompt generation
+prompt: ""
+
+# Device configuration
+device: "cuda"
+
+# Random seed
+seed: 0
+
+# Noise configuration
+noise_sigma: 0.03
+
+# Image directory containing multiple PNG images
+image_directory: "/users/5/dever120/FMPlug/data/images/hhfq"
+
+# OpenAI API key (can also be set via environment variable OPENAI_API_KEY)
+openai_api_key: ""  # Leave empty to use environment variable
+
+# Wandb configuration
+wandb_project: "FMPlug"
+wandb_tags: ["Multi-Image", "Super Resolution", "OpenAI VLM"]
+
+# Save directory
+save_base_path: "/users/5/dever120/FMPlug/experiments"

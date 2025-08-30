@@ -1,7 +1,9 @@
+# stdlib
 import logging
 import pickle
 from typing import Callable
 
+# third party
 import torch
 
 # ----------------------------
@@ -53,8 +55,8 @@ def integrate_euler(
     do_guidance = guidance_scale > 1.0
 
     for idx, t0 in enumerate(timesteps):
-        sigma = sigmas[idx]
-        sigma_next = sigmas[idx + 1]
+        sigma = sigmas[step_index]
+        sigma_next = sigmas[step_index + 1]
 
         logger.debug(
             f"Step {idx}: t0={t0.item():.4f}, "

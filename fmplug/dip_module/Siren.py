@@ -1,15 +1,17 @@
-from collections import OrderedDict
-import torch
-from torch import nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset
+# stdlib
 import os
+from collections import OrderedDict
 
-from PIL import Image
-from torchvision.transforms import Resize, Compose, ToTensor, Normalize
+# third party
+import matplotlib.pyplot as plt
 import numpy as np
 import skimage
-import matplotlib.pyplot as plt
+import torch
+import torch.nn.functional as F
+from PIL import Image
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
+from torchvision.transforms import Compose, Normalize, Resize, ToTensor
 
 
 def get_mgrid(img_shape):
@@ -19,7 +21,9 @@ def get_mgrid(img_shape):
     # tensors = tuple(dim * [torch.linspace(-1, 1, steps=sidelen)])
     # mgrid = torch.stack(torch.meshgrid(*tensors), dim=-1)
     # mgrid = mgrid.reshape(-1, dim)
-    x, y = np.meshgrid(np.linspace(0, 1, img_shape[-2]), np.linspace(0, 1, img_shape[-1]))
+    x, y = np.meshgrid(
+        np.linspace(0, 1, img_shape[-2]), np.linspace(0, 1, img_shape[-1])
+    )
     # Reshape the mesh grid into (64*128, 2)
     mgrid = np.column_stack([x.flatten(), y.flatten()])
     mgrid = torch.from_numpy(mgrid).float()
@@ -32,18 +36,18 @@ def laplace(y, x):
 
 
 def divergence(y, x):
-    div = 0.
+    div = 0.0
     for i in range(y.shape[-1]):
-        div += torch.autograd.grad(y[..., i], x, torch.ones_like(
-            y[..., i]), create_graph=True)[0][..., i:i+1]
+        div += torch.autograd.grad(
+            y[..., i], x, torch.ones_like(y[..., i]), create_graph=True
+        )[0][..., i : i + 1]
     return div
 
 
 def gradient(y, x, grad_outputs=None):
     if grad_outputs is None:
         grad_outputs = torch.ones_like(y)
-    grad = torch.autograd.grad(
-        y, [x], grad_outputs=grad_outputs, create_graph=True)[0]
+    grad = torch.autograd.grad(y, [x], grad_outputs=grad_outputs, create_graph=True)[0]
     return grad
 
 
@@ -55,8 +59,9 @@ class SineLayer(nn.Module):
     # If is_first=False, then the weights will be divided by omega_0 so as to keep the magnitude of
     # activations constant, but boost gradients to the weight matrix
 
-    def __init__(self, in_features, out_features, bias=True,
-                 is_first=False, omega_0=30):
+    def __init__(
+        self, in_features, out_features, bias=True, is_first=False, omega_0=30
+    ):
         super().__init__()
         self.omega_0 = omega_0
         self.is_first = is_first
@@ -69,11 +74,12 @@ class SineLayer(nn.Module):
     def init_weights(self):
         with torch.no_grad():
             if self.is_first:
-                self.linear.weight.uniform_(-1 / self.in_features,
-                                            1 / self.in_features)
+                self.linear.weight.uniform_(-1 / self.in_features, 1 / self.in_features)
             else:
-                self.linear.weight.uniform_(-np.sqrt(6 / self.in_features) / self.omega_0,
-                                            np.sqrt(6 / self.in_features) / self.omega_0)
+                self.linear.weight.uniform_(
+                    -np.sqrt(6 / self.in_features) / self.omega_0,
+                    np.sqrt(6 / self.in_features) / self.omega_0,
+                )
 
     def forward(self, input):
         return torch.sin(self.omega_0 * self.linear(input))
@@ -85,35 +91,61 @@ class SineLayer(nn.Module):
 
 
 class Siren(nn.Module):
-    def __init__(self, in_features, hidden_features, hidden_layers, out_features, outermost_linear=False,
-                 first_omega_0=30, hidden_omega_0=30.):
+    def __init__(
+        self,
+        in_features,
+        hidden_features,
+        hidden_layers,
+        out_features,
+        outermost_linear=False,
+        first_omega_0=30,
+        hidden_omega_0=30.0,
+    ):
         super().__init__()
 
         self.net = []
-        self.net.append(SineLayer(in_features, hidden_features,
-                                  is_first=True, omega_0=first_omega_0))
+        self.net.append(
+            SineLayer(
+                in_features, hidden_features, is_first=True, omega_0=first_omega_0
+            )
+        )
 
         for i in range(hidden_layers):
-            self.net.append(SineLayer(hidden_features, hidden_features,
-                                      is_first=False, omega_0=hidden_omega_0))
+            self.net.append(
+                SineLayer(
+                    hidden_features,
+                    hidden_features,
+                    is_first=False,
+                    omega_0=hidden_omega_0,
+                )
+            )
 
         if outermost_linear:
             final_linear = nn.Linear(hidden_features, out_features)
 
             with torch.no_grad():
-                final_linear.weight.uniform_(-np.sqrt(6 / hidden_features) / hidden_omega_0,
-                                             np.sqrt(6 / hidden_features) / hidden_omega_0)
+                final_linear.weight.uniform_(
+                    -np.sqrt(6 / hidden_features) / hidden_omega_0,
+                    np.sqrt(6 / hidden_features) / hidden_omega_0,
+                )
 
             self.net.append(final_linear)
         else:
-            self.net.append(SineLayer(hidden_features, out_features,
-                                      is_first=False, omega_0=hidden_omega_0))
+            self.net.append(
+                SineLayer(
+                    hidden_features,
+                    out_features,
+                    is_first=False,
+                    omega_0=hidden_omega_0,
+                )
+            )
 
         self.net = nn.Sequential(*self.net)
 
     def forward(self, coords):
-        coords = coords.clone().detach().requires_grad_(
-            True)  # allows to take derivative w.r.t. input
+        coords = (
+            coords.clone().detach().requires_grad_(True)
+        )  # allows to take derivative w.r.t. input
         output = self.net(coords)
         return output
 
@@ -133,8 +165,9 @@ class Siren(nn.Module):
                     x.retain_grad()
                     intermed.retain_grad()
 
-                activations['_'.join(
-                    (str(layer.__class__), "%d" % activation_count))] = intermed
+                activations[
+                    '_'.join((str(layer.__class__), "%d" % activation_count))
+                ] = intermed
                 activation_count += 1
             else:
                 x = layer(x)
@@ -142,8 +175,7 @@ class Siren(nn.Module):
                 if retain_grad:
                     x.retain_grad()
 
-            activations['_'.join(
-                (str(layer.__class__), "%d" % activation_count))] = x
+            activations['_'.join((str(layer.__class__), "%d" % activation_count))] = x
             activation_count += 1
 
         return activations

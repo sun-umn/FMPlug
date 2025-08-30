@@ -1,0 +1,37 @@
+# Super Resolution Configuration
+# Configuration file for super resolution task
+
+# Image and processing parameters
+image_size: 512
+scale_factor: 4
+num_inference_steps: 10
+guidance_scale: 2.0
+lr: 1.0e-2
+epochs: 10000
+strength: 0.85
+shift: 2.0
+ode_solver: "euler"
+
+# Text prompt for generation
+# prompt: ""
+prompt: "A close-up portrait of a baby with soft skin, short dark hair, and calm expression, wearing a green onesie, resting against a turquoise cushion"
+
+# Device configuration
+device: "cuda"
+
+# Random seed
+seed: 0
+
+# Noise configuration
+noise_sigma: 0.03
+
+# Image paths
+image_path: "/users/5/dever120/FMPlug/data/ffhq_baby.png"
+prompt_image_path: "/users/5/dever120/FMPlug/data/ffhq_baby.png"
+
+# Wandb configuration
+wandb_project: "FMPlug"
+wandb_tags: ["Super Resolution"]
+
+# Save directory
+save_base_path: "/users/5/dever120/FMPlug/experiments"
