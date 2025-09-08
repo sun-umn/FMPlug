@@ -1,0 +1,67 @@
+measurement:
+  noise: 
+    name: gaussian
+    sigma: 0.00
+  operator:
+    name: gaussian_blur
+    kernel_size: 61
+    intensity: 3.0
+  kernel_opt:
+    kernel: gaussian
+    kernel_size: 61
+    intensity: 3.0
+
+fmplug:
+  data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024/"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-DIP-noiseless-61"
+  img_size: 256
+  scale_factor: 4
+
+  method: "heun2"
+  alpha: 0.0
+  t_end: 0.0
+  NFE: 3
+  batch_size: 1
+  guidance_scale: 0.0
+  lr: 0.0
+  lr_t_ada: 0.0
+  decay_factor: 0.0
+  epochs: 5000
+  loss_multiplier: 1.0
+  vae_weight: 0.0
+  lpips_weight: 0.0
+  TV_reg_weight: 0.0
+  loss_fn: "mse"
+  data_type: torch.float32
+  optimizer_select: "adam"
+
+  es_window_size: 100
+  es_patience: 25
+  es_min_epochs: 500
+  es_delta: 0.000001
+
+  dip_in_channel: 16
+  dip_out_channel: 3
+  dip_num_channels_down: [256, 256, 256, 256, 256]
+  dip_num_channels_up: [256, 256, 256, 256, 256]
+  dip_num_channels_skip: [16, 16, 16, 16, 16]
+  dip_filter_size_down: 3
+  dip_filter_size_up: 3
+  dip_filter_skip_size: 1
+  dip_upsample_mode: "bilinear"
+  dip_need_sigmoid: False
+  dip_need_bias: True
+  dip_pad: "zero"
+  dip_act_fun: "LeakyReLU"
+  dip_lr: 0.001
+
+  siren_in_features: 2
+  siren_hidden_features: 512
+  siren_out_features: 3
+  siren_hidden_layers: 3
+  siren_outermost_linear: True
+
+  target_norm: 0.05
+
+
+

@@ -13,7 +13,7 @@ measurement:
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-R-Calibrated"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-W-Calibrated"
   img_size: 512
 
   method: "heun2"
@@ -32,7 +32,7 @@ fmplug:
   vae_weight: 0.0
   lpips_weight: 0.0
   TV_reg_weight: 0.0
-  is_gauss_reg: True
+  is_gauss_reg: False
   loss_fn: "mse"
   data_type: torch.bfloat16
   optimizer_select: "adam"
@@ -40,6 +40,6 @@ fmplug:
   es_window_size: 50
   es_patience: 25
   es_min_epochs: 100
-  es_delta: 0.000000005
+  es_delta: 0.000000001
 
   finetune_decoder_blocks_interval: 100

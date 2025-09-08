@@ -3,28 +3,28 @@ measurement:
     name: gaussian
     sigma: 0.03
   operator:
-    name: motion_blur
+    name: gaussian_blur
     kernel_size: 61
-    intensity: 0.5
-  kernel_opt: 
-    kernel: motion
+    intensity: 3.0
+  kernel_opt:
+    kernel: gaussian
     kernel_size: 61
-    intensity: 0.5
+    intensity: 3.0
 
 fmplug:
-  data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-R-Calibrated"
+  data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024/"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-OT-FMPlug-W-R-Res"
   img_size: 512
 
   method: "heun2"
   alpha: 0.8
-  t_end: 0.00
+  t_end: 0.0
   NFE: 3
   batch_size: 1
   guidance_scale: 0.0
-  lr_z: [0.5, 0.2]
+  lr_z: [0.5]
+  # lr_y: [0.1, 0.05, 0.02, 0.01]
   lr_dec: []
-  lr_t_ada: 0.01
   lr_alpha_ada: 0.005
   decay_factor: 0.95
   epochs: 1000
@@ -33,7 +33,7 @@ fmplug:
   lpips_weight: 0.0
   TV_reg_weight: 0.0
   is_gauss_reg: True
-  loss_fn: "mse"
+  loss_fn: "l1"
   data_type: torch.bfloat16
   optimizer_select: "adam"
   

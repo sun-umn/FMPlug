@@ -1,19 +1,19 @@
 measurement:
   noise: 
     name: gaussian
-    sigma: 0.03
+    sigma: 0.0
   operator:
-    name: motion_blur
+    name: gaussian_blur
     kernel_size: 61
-    intensity: 0.5
-  kernel_opt: 
-    kernel: motion
+    intensity: 3.0
+  kernel_opt:
+    kernel: gaussian
     kernel_size: 61
-    intensity: 0.5
+    intensity: 3.0
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-R-Calibrated"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-W-R-Calibrated-DGP"
   img_size: 512
 
   method: "heun2"
@@ -22,8 +22,8 @@ fmplug:
   NFE: 3
   batch_size: 1
   guidance_scale: 0.0
-  lr_z: [0.5, 0.2]
-  lr_dec: []
+  lr_z: [0.5, 0.2, 0.1, 0.05]
+  lr_dec: [0.0002, 0.00001, 0.00005, 0.00002]
   lr_t_ada: 0.01
   lr_alpha_ada: 0.005
   decay_factor: 0.95

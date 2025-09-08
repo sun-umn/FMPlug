@@ -1,3 +1,19 @@
+"""
+This file implements the forward measurement plug-in (FMPlug) for image reconstruction
+and inverse problems using Stable Diffusion 3. It includes functions for:
+
+- Setting random seeds for reproducibility.
+- Defining various loss functions (relative L1, hybrid, KL regularization).
+- Image utility functions (saving PNGs, visualization, latent normalization).
+- An ODE integration function for the diffusion process.
+- The main `solve` function that orchestrates the entire reconstruction pipeline,
+  including loading configurations, setting up the Stable Diffusion 3 model,
+  running the optimization loop, and saving results.
+
+The script leverages PyTorch for tensor operations, Hugging Face Diffusers for
+the Stable Diffusion 3 model, and Wandb for experiment tracking.
+"""
+
 # stdlib
 import glob
 import inspect
@@ -21,9 +37,6 @@ from PIL import Image
 from skimage.metrics import peak_signal_noise_ratio
 from torchvision import transforms
 import pickle
-import pandas as pd
-import cv2
-
 # first party
 from fmplug.losses.losses import PerceptualLossV3
 import lpips
@@ -31,7 +44,10 @@ from fmplug.utils.measurements import get_noise, get_operator
 from fmplug.utils.tv_norm import tv_lp_loss
 from fmplug.utils.image_utils import Blurkernel, generate_tilt_map, mask_generator
 from fmplug.utils.var_es import VarianceEarlyStopping, MeanEarlyStopping
-from fmplug.models.norm_net import MeanVarPredictor
+import pandas as pd
+import cv2
+
+torch.autograd.set_detect_anomaly(True)
 
 with open('poly13_model_var.pkl', 'rb') as f:
     reg = pickle.load(f)
@@ -40,21 +56,20 @@ with open('poly13_model_var.pkl', 'rb') as f:
 device = torch.device("cuda")
 scaler = torch.cuda.amp.GradScaler()
 
-reg_net = MeanVarPredictor(in_channels=16)
-reg_net.load_state_dict(torch.load("best_meanvar_model.pth", map_location=device))
-reg_net.to(device).eval()
-
 # Global variables for wandb
 API_KEY = "bb47140c09574b488dcf0bc3d92f09d93b6241ce"
-PROJECT_NAME = "FMPlug-Ada-DGP-ES"
+PROJECT_NAME = "FMPlug-W-R"
 
 # Enable wandb
 print("Initialize Project ...")
 wandb.login(key=API_KEY)  # type: ignore
 
-def set_seed(seed):
+def set_seed(seed: int) -> None:
     """
-    Function to set the seed for the run
+    Sets the random seed for reproducibility across multiple libraries.
+
+    Args:
+        seed (int): The seed value to use for all random number generators.
     """
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
@@ -66,25 +81,37 @@ def set_seed(seed):
 
 set_seed(123)  # Set a fixed seed for reproducibility
 
-def relative_l1_loss(pred, target, eps=1e-5):
+def relative_l1_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
     """
-    Relative L1 loss that reduces the influence of high absolute values.
+    Computes the relative L1 loss, which is less sensitive to large absolute
+    errors compared to standard L1 loss, especially useful for images with
+    varying intensity ranges.
 
     Args:
-        pred: Predicted image tensor, shape (N, C, H, W)
-        target: Ground truth image tensor, shape (N, C, H, W)
-        eps: Small constant to avoid division by zero
+        pred (torch.Tensor): The predicted tensor.
+        target (torch.Tensor): The ground truth tensor.
+        eps (float): A small constant added to the denominator to prevent division by zero.
 
     Returns:
-        Scalar loss
+        torch.Tensor: The scalar relative L1 loss.
     """
     diff = torch.abs(pred - target)
     denom = torch.abs(target) + eps
     relative_error = diff / denom
     return relative_error.mean()
 
+def hybrid_loss(pred: torch.Tensor, target: torch.Tensor, alpha: float = 0.8) -> torch.Tensor:
+    """
+    Computes a hybrid loss combining Mean Squared Error (MSE) and Relative L1 loss.
 
-def hybrid_loss(pred, target, alpha=0.8):
+    Args:
+        pred (torch.Tensor): Predicted tensor.
+        target (torch.Tensor): Ground truth tensor.
+        alpha (float): Weighting factor for MSE loss. (1 - alpha) is used for Relative L1 loss.
+
+    Returns:
+        torch.Tensor: The scalar hybrid loss.
+    """
     return alpha * torch.nn.functional.mse_loss(pred, target) + (1 - alpha) * relative_l1_loss(pred, target)
 
 
@@ -109,7 +136,16 @@ def kl_regularization(z):
     return kl
 
 
-def save_png_cv2(array, path):
+def save_png_cv2(array: np.ndarray, path: str) -> None:
+    """
+    Saves a NumPy array as a PNG image using OpenCV. Handles channel reordering
+    (CHW to HWC) and type conversion (float to uint8) if necessary.
+
+    Args:
+        array (np.ndarray): The input image array. Can be float (0-1) or uint8.
+                            Supports 1-channel (grayscale) or 3-channel (RGB/BGR).
+        path (str): The full path including filename where the image will be saved.
+    """
     # If array is CHW, convert to HWC
     if array.ndim == 3 and array.shape[0] in [1, 3]:
         array = np.transpose(array, (1, 2, 0))
@@ -125,7 +161,17 @@ def save_png_cv2(array, path):
 
     cv2.imwrite(path, array)
 
-def visualize_image(ref: np.array, y_n: np.array, output: np.array, save_file_name: str) -> None:
+def visualize_image(ref: np.ndarray, y_n: np.ndarray, output: np.ndarray, save_file_name: str) -> None:
+    """
+    Visualizes and saves a comparison of ground truth, corrupted, and reconstructed images,
+    along with a pixel-wise difference map.
+
+    Args:
+        ref (np.ndarray): Ground truth image (NumPy array).
+        y_n (np.ndarray): Corrupted input image (NumPy array).
+        output (np.ndarray): Reconstructed image (NumPy array).
+        save_file_name (str): Path to save the visualization.
+    """
     # Create a figure with 1 row, 3 columns
     fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(10, 10))
 
@@ -158,20 +204,7 @@ def visualize_image(ref: np.array, y_n: np.array, output: np.array, save_file_na
     )
     plt.close()
 
-
-def gauss_sphere_reg(z):
-    # with torch.no_grad():
-    #     if torch.norm(z, p=2) < 0.975 * math.sqrt(z.numel()):
-    #         z.data = z / torch.norm(z, p=2) * math.sqrt(z.numel()) * 0.975
-    #     elif torch.norm(z, p=2) > 1.025 * math.sqrt(z.numel()):
-    #         z.data = z / torch.norm(z, p=2) * math.sqrt(z.numel()) * 1.025
-    if torch.norm(z, p=2) < 0.975 * math.sqrt(z.numel()):
-        prjected_z = z / torch.norm(z, p=2) * math.sqrt(z.numel()) * 0.975
-    elif torch.norm(z, p=2) > 1.025 * math.sqrt(z.numel()):
-        prjected_z = z / torch.norm(z, p=2) * math.sqrt(z.numel()) * 1.025
-    return prjected_z
-
-def normalize_latent(z_x: torch.Tensor, t_x: torch.Tensor, eps=1e-6) -> torch.Tensor:
+def normalize_latent(z_x: torch.Tensor, t_x: torch.Tensor) -> torch.Tensor:
     """
     Normalizes a latent tensor `z_x` at a given time `t_x` using a pre-trained
     regression model (`reg`) to estimate the target variance.
@@ -183,28 +216,10 @@ def normalize_latent(z_x: torch.Tensor, t_x: torch.Tensor, eps=1e-6) -> torch.Te
     Returns:
         torch.Tensor: The normalized latent tensor.
     """
-    with torch.no_grad():
-        z_stat = reg_net(z_x, t_x.expand(z_x.shape[0], 1))
-        z_mean, z_var = z_stat[...,0], z_stat[...,1]
-    z_var = z_var.to(dtype=z_x.dtype, device=z_x.device)
-    z_mean = z_mean.to(dtype=z_mean.dtype, device=z_mean.device)
-    
-    # print("z_var: ", z_var.mean().item(), " z_mean: ", z_mean.mean().item())
-    
-    # compute current statistics
-    cur_mean = z_x.mean(dim=list(range(1, z_x.dim())), keepdim=True)
-    cur_var  = z_x.var(dim=list(range(1, z_x.dim())), unbiased=False, keepdim=True)
-
-    # normalize
-    normalized = (z_x - cur_mean) / torch.sqrt(cur_var + eps)
-    z_calibrated = normalized * torch.sqrt(z_var + eps) + z_mean
-    return z_calibrated
-    
-    # z_var = reg(t_x.detach().cpu().float().numpy()) * (1 + np.random.randn() * 0.02)
-    # scale = torch.sqrt(z_var / torch.var(z_x, unbiased=False))
-    # scale_unit = torch.sqrt(z_var)
-    # z_scaled = z_x * scale
-            # + 0.02 * torch.randn_like(z_x) * scale_unit
+    z_var = reg(t_x.detach().cpu().float().numpy())
+    z_var = torch.tensor(z_var, dtype=z_x.dtype, device=z_x.device)
+    scale = torch.sqrt(z_var / torch.var(z_x, unbiased=False))
+    z_scaled = z_x * scale
     # inst_norm = torch.nn.InstanceNorm2d(z_x.shape[1], affine=False)
     # z_x_norm = inst_norm(z_x)
     # z_scaled = z_x_norm * z_var**0.5
@@ -213,105 +228,227 @@ def normalize_latent(z_x: torch.Tensor, t_x: torch.Tensor, eps=1e-6) -> torch.Te
     # print("Var(z_t)", torch.var(z_x, unbiased=False).item())
     # print("sqrt(Var(Z_t)/Var(z_t)): ", scale.item())
     # z_scaled = z_x
-    # return z_scaled
+    return z_scaled
 
+def gauss_sphere_reg(z):
+    with torch.no_grad():
+        if torch.norm(z, p=2) < 0.95 * math.sqrt(z.numel()):
+            z.data = z / torch.norm(z, p=2) * math.sqrt(z.numel()) * 0.95
+        elif torch.norm(z, p=2) > 1.05 * math.sqrt(z.numel()):
+            z.data = z / torch.norm(z, p=2) * math.sqrt(z.numel()) * 1.05
+        else:
+            z.data = z
+    return z
 
 def integrate(
     f,
     z,
     t,
-    NFE,
+    t_end,
+    NFE: int,
     prompt_embedding,
-    pooled_prompt_embedding,
+    prompt_pooled_embedding,
+    null_embedding,
+    null_pooled_embedding,
     device,
-    guidance_scale: float = 7.0,
-    method: str = "heun2"):
-    
-    do_classifier_free_guidance = guidance_scale > 1.0
-    # print("t: ", t)
-    # print("NFE: ", NFE)
-    temp_t = 1000 * t
-    # print("temp_t: ", temp_t)
-    delta_t = temp_t / NFE
-    temp_t_next = temp_t - delta_t 
-    
-    sigma = temp_t / 1000
-    sigma_next = temp_t_next / 1000
-    zt = z
+    guidance_scale: float = 0.0,
+    method: str = "heun2",
+):
+
+    # ----- Normalize inputs (device/dtype) -----
+    zt = z.clone()
+    temp_t = 1000.0 * t.clone()
+    delta_t = (temp_t - t_end) / float(NFE)
+    temp_t_next = temp_t - delta_t
+
+    sigma = temp_t / 1000.0
+    sigma_next = temp_t_next / 1000.0
+
+    # If normalize_latent needs time, pass the current (possibly detached) temp_t
     zt = normalize_latent(zt, temp_t)
 
-    for i in range(NFE):
-        
+    do_cfg = guidance_scale > 0.0
+
+    for _ in range(NFE):
         latent_model_input = zt
-        time_step = temp_t.expand(latent_model_input.shape[0])
-        time_step_next = temp_t_next.expand(latent_model_input.shape[0])
-        if method == 'euler':
-            noise_pred = f(
-                x=latent_model_input,
-                t=time_step,
-                prompt_embedding=prompt_embedding,
-                pooled_embedding=pooled_prompt_embedding,
+
+        # Expand scalar timesteps to batch length without allocating new storage
+        bsz = latent_model_input.shape[0]
+        time_step = temp_t.expand(bsz)
+        time_step_next = temp_t_next.expand(bsz)
+
+        # Differential step in sigma space
+        dt = sigma_next - sigma  # scalar tensor (broadcast OK)
+
+        # Prepare batched inputs for CFG (avoid unnecessary allocs)
+        if do_cfg:
+            model_input_batch = torch.cat((latent_model_input, latent_model_input), dim=0)
+            prompt_emb_batch = torch.cat((null_embedding, prompt_embedding), dim=0)
+            pooled_emb_batch = torch.cat((null_pooled_embedding, prompt_pooled_embedding), dim=0)
+            time_step_batch = torch.cat((time_step, time_step), dim=0)
+            time_step_next_batch = torch.cat((time_step_next, time_step_next), dim=0)
+        else:
+            model_input_batch = latent_model_input
+            prompt_emb_batch = null_embedding
+            pooled_emb_batch = null_pooled_embedding
+            time_step_batch = time_step
+            time_step_next_batch = time_step_next
+
+        # ----- Integrators -----
+        if method == "euler":
+            k_batch = f(
+                x=model_input_batch,
+                t=time_step_batch,
+                prompt_embedding=prompt_emb_batch,
+                pooled_embedding=pooled_emb_batch,
                 device=device,
             )
+            noise_pred = dt * k_batch
 
-        elif method == 'heun2':
-            dt = sigma_next - sigma
-            k1 = f(
-                x=latent_model_input,
-                t=time_step,
-                prompt_embedding=prompt_embedding,
-                pooled_embedding=pooled_prompt_embedding,
+        elif method == "heun2":
+            # k1
+            k1_batch = f(
+                x=model_input_batch,
+                t=time_step_batch,
+                prompt_embedding=prompt_emb_batch,
+                pooled_embedding=pooled_emb_batch,
                 device=device,
             )
-
-            # Predict next latent using Euler step
-            x1_pred = latent_model_input + dt * k1
-
-            # k2
-            k2 = f(
-                x=x1_pred,
-                t=time_step_next,
-                prompt_embedding=prompt_embedding,
-                pooled_embedding=pooled_prompt_embedding,
+            # Euler predict
+            x1_pred_batch = model_input_batch + dt * k1_batch
+            # k2 at t_next
+            k2_batch = f(
+                x=x1_pred_batch,
+                t=time_step_next_batch,
+                prompt_embedding=prompt_emb_batch,
+                pooled_embedding=pooled_emb_batch,
                 device=device,
             )
-            
-            # Heun2 step (average slope)
-            noise_pred = 0.5 * dt * (k1 + k2)
-
-        if do_classifier_free_guidance:
-            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + guidance_scale * (
-                noise_pred_text - noise_pred_uncond
-            )
+            noise_pred = 0.5 * dt * (k1_batch + k2_batch)
 
         else:
-            noise_pred, noise_pred_text = noise_pred.chunk(2)
+            raise ValueError(f"Unknown method: {method}")
 
-        # Update step for euler
-        # prev_sample = sample + dt * noise_pred
+        # ----- Classifier-Free Guidance -----
+        if do_cfg:
+            # Split on batch dimension
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
-        # Update step for huen2
+        # Update latent state
         zt = zt + noise_pred
+
+        # Keep time-scalar graph small; never carry cross-iteration history accidentally.
+        temp_t = temp_t - delta_t
+        temp_t_next = temp_t_next - delta_t
+        sigma = temp_t / 1000.0
+        sigma_next = temp_t_next / 1000.0
+        # For logging without attaching to graph:
+        # print("temp_t:", temp_t.detach().item() if temp_t.numel() == 1 else temp_t.detach().cpu())
+        # print("temp_t: ", temp_t.item())
         
-        temp_t = temp_t - delta_t 
-        temp_t_next = temp_t - delta_t 
-    
-        sigma = temp_t / 1000
-        sigma_next = temp_t_next / 1000
-        # print("temp_t: ", temp_t)
+    if temp_t >= 1E-2:
+        latent_model_input = zt
+        
+        temp_t_next = temp_t - t_end
+        sigma_next = temp_t_next / 1000.0
+
+        # Expand scalar timesteps to batch length without allocating new storage
+        bsz = latent_model_input.shape[0]
+        time_step = temp_t.expand(bsz)
+        time_step_next = temp_t_next.expand(bsz)
+
+        # Differential step in sigma space
+        dt = sigma_next - sigma  # scalar tensor (broadcast OK)
+
+        # Prepare batched inputs for CFG (avoid unnecessary allocs)
+        if do_cfg:
+            model_input_batch = torch.cat((latent_model_input, latent_model_input), dim=0)
+            prompt_emb_batch = torch.cat((null_embedding, prompt_embedding), dim=0)
+            pooled_emb_batch = torch.cat((null_pooled_embedding, prompt_pooled_embedding), dim=0)
+            time_step_batch = torch.cat((time_step, time_step), dim=0)
+            time_step_next_batch = torch.cat((time_step_next, time_step_next), dim=0)
+        else:
+            model_input_batch = latent_model_input
+            prompt_emb_batch = null_embedding
+            pooled_emb_batch = null_pooled_embedding
+            time_step_batch = time_step
+            time_step_next_batch = time_step_next
+
+        # ----- Integrators -----
+        if method == "euler":
+            k_batch = f(
+                x=model_input_batch,
+                t=time_step_batch,
+                prompt_embedding=prompt_emb_batch,
+                pooled_embedding=pooled_emb_batch,
+                device=device,
+            )
+            noise_pred = dt * k_batch
+
+        elif method == "heun2":
+            # k1
+            k1_batch = f(
+                x=model_input_batch,
+                t=time_step_batch,
+                prompt_embedding=prompt_emb_batch,
+                pooled_embedding=pooled_emb_batch,
+                device=device,
+            )
+            # Euler predict
+            x1_pred_batch = model_input_batch + dt * k1_batch
+            # k2 at t_next
+            k2_batch = f(
+                x=x1_pred_batch,
+                t=time_step_next_batch,
+                prompt_embedding=prompt_emb_batch,
+                pooled_embedding=pooled_emb_batch,
+                device=device,
+            )
+            noise_pred = 0.5 * dt * (k1_batch + k2_batch)
+
+        else:
+            raise ValueError(f"Unknown method: {method}")
+
+        # ----- Classifier-Free Guidance -----
+        if do_cfg:
+            # Split on batch dimension
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+        # Update latent state
+        zt = zt + noise_pred
+        # print("temp_t_next: ", temp_t_next.item())
+        
 
     return zt
 
 
+
 def solve(config_name: str) -> None:
+    """
+    Solves an inverse problem using a diffusion model (Stable Diffusion 3)
+    with a forward measurement plug-in. This function orchestrates the entire
+    reconstruction pipeline, including:
+    1. Loading configuration parameters.
+    2. Setting up Wandb for experiment tracking.
+    3. Preparing ground truth and corrupted images.
+    4. Initializing and configuring the Stable Diffusion 3 model components (transformer, VAE).
+    5. Defining the ODE integration process.
+    6. Running an optimization loop to reconstruct the image.
+    7. Logging metrics and saving results (images, history, config).
+
+    Args:
+        config_name (str): The name of the YAML configuration file (without extension)
+                           located in `./fmplug/configs`.
+    """
 
     # Current memory usage by tensors (in MB)
     print("Init Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
     print("Init Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB")
 
     # Load in the configuration
-    base_config_path = "/home/jusun/wan01530/Project/FMPlug/fmplug/configs"
+    base_config_path = "./fmplug/configs"
     with open(os.path.join(base_config_path, config_name + ".yaml"), "r") as file:
         config_all = yaml.safe_load(file)
 
@@ -325,6 +462,7 @@ def solve(config_name: str) -> None:
     NFE = fmplug_config["NFE"]
     guidance_scale = fmplug_config["guidance_scale"]
     lr_z = fmplug_config["lr_z"]
+    lr_y = fmplug_config["lr_y"]
     lr_dec = fmplug_config["lr_dec"]
     # lr_t_ada = fmplug_config["lr_t_ada"]
     lr_alpha_ada = fmplug_config["lr_alpha_ada"]
@@ -361,8 +499,9 @@ def solve(config_name: str) -> None:
                 "method": method,
                 "optimizer": optimizer_select,
                 "lr_z": lr_z,
+                "lr_y": lr_y,
                 "lr_dec": lr_dec,
-                # "lr_t_ada": lr_t_ada,
+                "lr_alpha_ada": lr_alpha_ada,
                 "decay_factor": decay_factor,
                 "epochs": epochs,
                 "loss_multiplier": loss_multiplier,
@@ -388,14 +527,15 @@ def solve(config_name: str) -> None:
             with open(prompt_path, "r", encoding="utf-8") as f:
                 prompt = f.read().strip()
 
-            # Get relative path starting from `task`
-            rel_path = os.path.relpath(gt_path, start=data_folder)
-
-            rel_dir = os.path.dirname(rel_path)  # gives: task/some_folder/another_folder
-
         else:
             print(f"Warning: prompt.txt not found for {gt_path}")
-            prompt = None
+            prompt = [""]
+        
+        # Get relative path starting from `task`
+        rel_path = os.path.relpath(gt_path, start=data_folder)
+
+        rel_dir = os.path.dirname(rel_path)  # gives: task/some_folder/another_folder
+        
         gt_img = Image.open(gt_path).convert("RGB")
 
         tf = transforms.Compose(
@@ -444,18 +584,16 @@ def solve(config_name: str) -> None:
         os.makedirs(os.path.join(save_dir, rel_dir), exist_ok=True)
 
         print("Load in SD3 image to image model ...")
-        pipe = StableDiffusion3Img2ImgPipeline.from_pretrained(
+        pipe = StableDiffusion3Pipeline.from_pretrained(
             "stabilityai/stable-diffusion-3-medium-diffusers",
-            text_encoder_3=None,
-            tokenizer_3=None,
             torch_dtype=data_type,
         )
-        pipe = pipe.to(device, dtype=data_type)
+        pipe = pipe.to(device)
+        pipe = pipe.to(device=device, dtype=data_type)
+
         # pipe.enable_model_cpu_offload()
 
         # Extract different components of the pipeline
-        prompt_encoder = pipe.encode_prompt
-
         # Transformer block
         transformer = pipe.transformer
         transformer.eval()
@@ -469,66 +607,95 @@ def solve(config_name: str) -> None:
         vae.decoder.requires_grad_(False) # Freeze decoder initially
         vae.enable_gradient_checkpointing()
 
-        prompt_2 = None
-        prompt_3 = None
+        tokenizer_1 = pipe.tokenizer
+        tokenizer_2 = pipe.tokenizer_2
+        tokenizer_3 = pipe.tokenizer_3
+        text_enc_1 = pipe.text_encoder
+        text_enc_2 = pipe.text_encoder_2
+        text_enc_3 = pipe.text_encoder_3
+        
+        tokenizer_1.requires_grad = False
+        tokenizer_2.requires_grad = False
+        tokenizer_3.requires_grad = False
+        text_enc_1.requires_grad = False
+        text_enc_2.requires_grad = False
+        text_enc_3.requires_grad = False
+        
+        def encode_prompt(prompt: List[str]) -> List[torch.Tensor]:
+            # CLIP encode (used for modulation of adaLN-zero)
+            # now, we have two CLIPs
+            text_clip1_ids = tokenizer_1(prompt,
+                                            padding="max_length",
+                                            max_length=77,
+                                            truncation=True,
+                                            return_tensors='pt').input_ids
+            text_clip1_emb = text_enc_1(text_clip1_ids.to(text_enc_1.device), output_hidden_states=True)
+            pool_clip1_emb = text_clip1_emb[0].to(dtype=data_type, device=text_enc_1.device)
+            text_clip1_emb = text_clip1_emb.hidden_states[-2].to(dtype=data_type, device=text_enc_1.device)
 
-        negative_prompt = ""
-        negative_prompt_2 = None
-        negative_prompt_3 = None
+            text_clip2_ids = tokenizer_2(prompt,
+                                            padding="max_length",
+                                            max_length=77,
+                                            truncation=True,
+                                            return_tensors='pt').input_ids
+            text_clip2_emb = text_enc_2(text_clip2_ids.to(text_enc_2.device), output_hidden_states=True)
+            pool_clip2_emb = text_clip2_emb[0].to(dtype=data_type, device=text_enc_2.device)
+            text_clip2_emb = text_clip2_emb.hidden_states[-2].to(dtype=data_type, device=text_enc_2.device)
 
-        do_classifier_free_guidance = True
-        prompt_embeds = None
-        negative_prompt_embeds = None
-        pooled_prompt_embeds = None
-        negative_pooled_prompt_embeds = None
-        clip_skip = None
-        num_images_per_prompt = 1
-        max_sequence_length = 256
-        lora_scale = None
+            # T5 encode (used for text condition)
+            text_t5_ids = tokenizer_3(prompt,
+                                        padding="max_length",
+                                        max_length=77,
+                                        truncation=True,
+                                        add_special_tokens=True,
+                                        return_tensors='pt').input_ids
+            text_t5_emb = text_enc_3(text_t5_ids.to(text_enc_3.device))[0]
+            text_t5_emb = text_t5_emb.to(dtype=data_type, device=text_enc_3.device)
 
-        # encode prompt
-        print("Encode prompt ...")
-        with torch.no_grad():
-            (
-                prompt_embeds,
-                negative_prompt_embeds,
-                pooled_prompt_embeds,
-                negative_pooled_prompt_embeds,
-            ) = prompt_encoder(
-                prompt=prompt,
-                prompt_2=prompt_2,
-                prompt_3=prompt_3,
-                negative_prompt=negative_prompt,
-                negative_prompt_2=negative_prompt_2,
-                negative_prompt_3=negative_prompt_3,
-                do_classifier_free_guidance=do_classifier_free_guidance,
-                prompt_embeds=prompt_embeds,
-                negative_prompt_embeds=negative_prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-                device=device,
-                clip_skip=clip_skip,
-                num_images_per_prompt=num_images_per_prompt,
-                max_sequence_length=max_sequence_length,
-                lora_scale=lora_scale,
+
+            # Merge
+            clip_prompt_emb = torch.cat([text_clip1_emb, text_clip2_emb], dim=-1)
+            clip_prompt_emb = torch.nn.functional.pad(
+                clip_prompt_emb, (0, text_t5_emb.shape[-1] - clip_prompt_emb.shape[-1])
             )
+            prompt_emb = torch.cat([clip_prompt_emb, text_t5_emb], dim=-2)
+            pooled_prompt_emb = torch.cat([pool_clip1_emb, pool_clip2_emb], dim=-1)
+
+            return prompt_emb, pooled_prompt_emb
+            
 
         # prompt embeds with classifier free guidance
-        prompt_embedding = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-        pooled_embedding = torch.cat(
-            [negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0
-        )
+        if guidance_scale > 0.0:
+            prompt_embedding, pooled_embedding = encode_prompt(prompt)
+            prompt_embedding = prompt_embedding.detach()
+            pooled_embedding = pooled_embedding.detach()
+            prompt_embedding.requires_grad = False
+            pooled_embedding.requires_grad = False
+
+        else:
+            prompt_embedding, pooled_embedding = None, None
+        null_prompt_embedding, null_pooled_embedding = encode_prompt([""])
+
+        null_prompt_embedding = null_prompt_embedding.detach()
+        null_pooled_embedding = null_pooled_embedding.detach()
+        null_prompt_embedding.requires_grad = False
+        null_pooled_embedding.requires_grad = False
+        
 
         del pipe
-        del prompt_encoder
+        del tokenizer_1, tokenizer_2, tokenizer_3, text_enc_1, text_enc_2, text_enc_3
         torch.cuda.empty_cache()
+
         
         # Current memory usage by tensors (in MB)
         print("Model Load Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
         print("Model Load Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB")
+
         
         def encode(image: torch.Tensor) -> torch.Tensor:
             z = vae.encode(image).latent_dist.sample()
+            print("vae.encode(image): ", vae.encode(image))
+            print("vae.encode(image).latent_dist: ", vae.encode(image).latent_dist)
             z = (z-vae.config.shift_factor) * vae.config.scaling_factor
             return z
 
@@ -554,33 +721,28 @@ def solve(config_name: str) -> None:
         img = img.to(y_n.dtype)
         img = img.to(device)
         with torch.no_grad():
-            # if "super_resolution" in task:
-            #     blur = transforms.GaussianBlur(kernel_size=7, sigma=1.0)
-            #     z = encode(blur(img))
-            # else:
-            #     z = encode(img)
             latent_y = encode(img)
+            # latent_y = (latent_y - latent_y.mean()) / latent_y.std()
             latent_y = latent_y.detach()
-            # latent_y = (latent_y / torch.norm(latent_y, p=2) * math.sqrt(latent_y.numel())).detach()
             latent_y = latent_y.requires_grad_(False)
         
         del img
 
        
+        print("latent_y: ", latent_y.mean(), latent_y.std())
         
         z = torch.randn_like(latent_y)
         z = z / torch.norm(z, p=2) * math.sqrt(z.numel())
         z = torch.nn.parameter.Parameter(z, True).to(device)
         z = z.requires_grad_(True)
-        # t_ada = torch.tensor(12.0 * (1.0 - alpha) - 6.0).to(device)
-        # t_ada = torch.tensor(-1.0).to(device)
-        # t_ada = t_ada.requires_grad_(True)
+
+        y_res = torch.randn_like(latent_y)
+        y_res = torch.nn.parameter.Parameter(y_res, True).to(device)
+        y_res = y_res.requires_grad_(True)
         
         alpha_ada = torch.tensor(alpha).to(device)
         alpha_ada = alpha_ada.requires_grad_(True)
         t_ada = (1 - torch.sigmoid((alpha_ada-0.5)*6))
-
-        # amplitude = torch.tensor(torch.pi).to(dtype=data_type, device=device)
         
         # Solve the ODE
         print("Solve inverse problem ...")
@@ -598,14 +760,17 @@ def solve(config_name: str) -> None:
 
             return result
 
-        def checkpointed_integrate(z):
+        def checkpointed_integrate(z, t_ada):
             return integrate(
                 f,
                 z,
                 t_ada,
+                t_end,
                 NFE,
                 prompt_embedding,
                 pooled_embedding,
+                null_prompt_embedding, 
+                null_pooled_embedding,
                 device,
                 guidance_scale=guidance_scale,
                 method=method
@@ -632,30 +797,16 @@ def solve(config_name: str) -> None:
         L2_tv = tv_lp_loss(pow = 2)
         
         if optimizer_select == "adam":
-            params_group1 = {'params': z, 'lr': lr_z[0]}
-            # params_group2 = {'params': t_ada, 'lr': lr_t_ada}
-            params_group2 = {'params': alpha_ada, 'lr': lr_alpha_ada}
+            params_group1 = {'params': [z], 'lr': lr_z[0]}
+            params_group2 = {'params': [y_res], 'lr': lr_y[0]}
+            params_group3 = {'params': alpha_ada, 'lr': lr_alpha_ada}
             
             # Get decoder blocks for incremental fine-tuning
             decoder_blocks = list(vae.decoder.up_blocks) # Assuming decoder blocks are in vae.decoder.up_blocks
             num_decoder_blocks = len(decoder_blocks)
             
-            
-            # unfreeze_schedule = [
-            #                     vae.decoder.conv_in,
-            #                     vae.decoder.mid_block,
-            #                     vae.decoder.up_blocks[0],
-            #                     vae.decoder.up_blocks[1],
-            #                     vae.decoder.up_blocks[2],
-            #                     vae.decoder.up_blocks[3],
-            #                     vae.decoder.conv_norm_out,
-            #                     vae.decoder.conv_act,
-            #                     vae.decoder.conv_out,
-            #                 ]
-
-            
             # Initialize optimizer with z and t_ada, no decoder params initially
-            optimizer = torch.optim.AdamW([params_group1, params_group2])
+            optimizer = torch.optim.AdamW([params_group1, params_group2, params_group3])
             # t_ada = 1 - alpha_ada  # Initialize t_ada as 1 - alpha_ada
             
         
@@ -674,16 +825,53 @@ def solve(config_name: str) -> None:
         print("Init Opt Cached:   ", round(torch.cuda.memory_reserved(0) / 1024**2, 2), "MB")
         decoded_output = None
         d = math.sqrt(z.numel())
+        def closure():
+            nonlocal decoded_output
+            optimizer.zero_grad()
+            # torch.cuda.reset_peak_memory_stats()
+            with torch.amp.autocast("cuda", dtype=data_type):
+                temp_alpha = torch.sigmoid((alpha_ada-0.5)*6)
+                temp_y = 0.2 * torch.tanh(y_res) + latent_y
+                temp_z = (1-temp_alpha) * z + temp_alpha * temp_y
+                x_t = checkpoint(checkpointed_integrate, temp_z, t_ada)
+                x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
+                # print("vae.config.scaling_factor: ", vae.config.scaling_factor)
+                # print("vae.config.shift_factor: ", vae.config.shift_factor)
+                # print("vae.decode(x_t): ", vae.decode(x_t))
+                decoded_output = torch.sin(vae.decode(x_t).sample)
+
+                if measure_config['operator']['name'] == 'inpainting':
+                    operator_decoded_output = operator.forward(decoded_output, mask=mask)
+                else:
+                    operator_decoded_output = operator.forward(decoded_output)
+
+                loss = criterion(operator_decoded_output, y_n)
+                encoded = vae.encode(decoded_output).latent_dist.sample()
+                loss += vae_weight * criterion(x_t, encoded)
+                loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
+                # loss += lpips_weight * lpips_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0).mean()
+                # loss += kl_regularization(temp_y) * 0.00001
+                loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
+                loss *= loss_multiplier
+            
+            loss = loss.float()
+            # scaler.scale(loss).backward()
+            loss.backward()
+            # Report peak memory used in MB
+            # peak_memory = torch.cuda.max_memory_allocated() / 1024**2
+            # print(f"Peak GPU memory used: {peak_memory:.2f} MB")
+            # print("gradient z: ", z.grad.min(), z.grad.max())
+            
+            # During training loop:
+            
+
+            # Backward + optimizer.step()
+
+            return loss
 
         # total_start_time = time.time()
 
         for iterator in tqdm.tqdm(range(epochs)):
-            if is_gauss_reg:
-                # with torch.no_grad():
-                #     z.data = z / torch.norm(z, p=2) * math.sqrt(z.numel())
-                prjected_z = gauss_sphere_reg(z) # TODO: randomness for stability
-            else:
-                prjected_z = z
             iter_start_time = time.time()
             # Incremental fine-tuning of VAE decoder blocks
             # if finetune_decoder_blocks_interval > 0 and iterator % finetune_decoder_blocks_interval == 0 and iterator < finetune_decoder_blocks_interval * num_decoder_blocks:
@@ -698,6 +886,7 @@ def solve(config_name: str) -> None:
                         
                     # optimizer.param_groups[0]['lr'] = lr[block_to_unfreeze_idx]
                     optimizer.param_groups[0]['lr'] = lr_z[block_to_unfreeze_idx+1]
+                    optimizer.param_groups[1]['lr'] = lr_y[block_to_unfreeze_idx+1]
                     # for param_group_idx in range(1, block_to_unfreeze_idx + 1):
                     #     # Update the learning rate for previously added decoder blocks
                     #     if optimizer.param_groups[-param_group_idx]['lr'] != 0.0:
@@ -710,43 +899,11 @@ def solve(config_name: str) -> None:
                 #     optimizer.param_groups[-1]['lr'] = lr_dec[block_to_unfreeze_idx]
             
             
-            def closure():
-                nonlocal decoded_output
-                optimizer.zero_grad()
-                # torch.cuda.reset_peak_memory_stats()
-                with torch.amp.autocast("cuda", dtype=data_type):
-                    temp_alpha = torch.sigmoid((alpha_ada-0.5)*6)
-                    temp_z = (1-temp_alpha) * prjected_z + temp_alpha * latent_y
-                    x_t = checkpoint(checkpointed_integrate, temp_z)
-                    decoded_output = torch.sin(decode(x_t))
-
-                    if measure_config['operator']['name'] == 'inpainting':
-                        operator_decoded_output = operator.forward(decoded_output, mask=mask)
-                    else:
-                        operator_decoded_output = operator.forward(decoded_output)
-
-                    loss = criterion(operator_decoded_output, y_n)
-                    encoded = vae.encode(decoded_output).latent_dist.sample()
-                    loss += vae_weight * criterion(x_t, encoded)
-                    loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
-                    loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
-                    loss *= loss_multiplier
-                
-                loss = loss.float()
-                # scaler.scale(loss).backward()
-                loss.backward()
-                # Report peak memory used in MB
-                # peak_memory = torch.cuda.max_memory_allocated() / 1024**2
-                # print(f"Peak GPU memory used: {peak_memory:.2f} MB")
-                # print("gradient z: ", z.grad.min(), z.grad.max())
-
-                return loss
-            
-            
             if optimizer_select == "adam":
                 loss = optimizer.step(closure)
-                new_lr = lr_alpha_ada * (decay_factor ** iterator)
-                optimizer.param_groups[1]['lr'] = new_lr
+
+                # new_lr = lr_t_ada * (decay_factor ** iterator)
+                # optimizer.param_groups[1]['lr'] = new_lr
                 
             t_ada = (1 - torch.sigmoid((alpha_ada-0.5)*6))
             
@@ -759,7 +916,10 @@ def solve(config_name: str) -> None:
             z_rel_updates.append(rel_update.item())
             z_prev = z.clone().detach()
             # scheduler.step()
-            
+            if is_gauss_reg:
+                # with torch.no_grad():
+                #     z.data = z / torch.norm(z, p=2) * math.sqrt(z.numel())
+                z = gauss_sphere_reg(z)
             losses.append(loss.item())
             
             # print("Opt Allocated:", round(torch.cuda.memory_allocated(0) / 1024**2, 2), "MB")
@@ -770,11 +930,6 @@ def solve(config_name: str) -> None:
             
             # Evaluate
             with torch.no_grad():
-                with torch.amp.autocast("cuda", dtype=data_type):
-                    temp_alpha = torch.sigmoid((alpha_ada-0.5)*6)
-                    temp_z = (1-temp_alpha) * z + temp_alpha * latent_y
-                    x_t = checkpoint(checkpointed_integrate, temp_z)
-                    decoded_output = torch.sin(decode(x_t))
                 output = decoded_output.detach().float()
                 lpips_score = lpips_loss_fn(output, ref_img).mean()
                 output_numpy = np.clip((output.cpu().squeeze().numpy() + 1) / 2, 0, 1)
@@ -820,6 +975,11 @@ def solve(config_name: str) -> None:
                     df_new.to_csv(log_path, mode='a', header=False, index=False)
                 else:
                     df_new.to_csv(log_path, mode='w', header=True, index=False)
+                    
+                if (iterator + 1  ) % 50 == 0:
+                    visualize_image(ref_numpy, y_n_numpy, output_numpy, os.path.join(save_dir, rel_dir, f"img_diff_{str(iterator)}.png"))
+                    np.save(os.path.join(save_dir, rel_dir, f"reconstruction_{str(iterator)}.npy"), output_numpy)
+                    save_png_cv2(output_numpy, os.path.join(save_dir, rel_dir, f"reconstruction_{str(iterator)}.png"))
                 
                 if early_stop_indicator.get_flag() == False:
                     if optimizer_select == "adam":

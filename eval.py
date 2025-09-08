@@ -1,205 +1,167 @@
-from skimage.metrics import peak_signal_noise_ratio as compare_psnr
-from skimage.metrics import structural_similarity as compare_ssim
-import lpips
-import torch
-import numpy as np
+import argparse
 import os
-from DISTS_pytorch import DISTS
-from pytorch_fid.fid_score import calculate_fid_given_paths
-from PIL import Image
-from torchmetrics.image.quality_assessment import NIQE # For NIQE
+import numpy as np
+import torch
+import lpips
+from skimage.metrics import peak_signal_noise_ratio, structural_similarity
+from piq import CLIPIQA
+import pandas as pd
+from tqdm import tqdm
+from torchvision.transforms import Resize
 
-# --- Configuration ---
-# Manually set the base experiment directory here.
-# Example: base_experiment_dir = '/scratch.global/wan01530/FMPlug/experiments/my_experiment_run/'
-base_experiment_dir = '/scratch.global/wan01530/FMPlug/experiments/xxxx/' # REPLACE 'xxxx' with your actual experiment ID
+clipiqa = CLIPIQA().cuda()
 
-# --- Initialize Metric Accumulators ---
-psnr_scores = []
-ssim_scores = []
-lpips_scores = []
-dists_scores = []
+root_dir = "/scratch.global/wan01530/FlowDPS/results/flowdps"
+output_csv = "/scratch.global/wan01530/FMPlug/performance_metrics_flowdps.csv"
+# target_size = (256, 256)  # Assuming target size for resizing
+target_size = None  # Assuming target size for resizing
 
-# Lists to store images for FID calculation
-gt_images_for_fid = []
-recon_images_for_fid = []
-
-# Lists to store reconstructed images for no-reference metrics
-recon_images_for_no_ref_metrics = []
-niqe_scores = [] # For NIQE scores
-
-# Initialize LPIPS, DISTS, and NIQE models
-lpips_loss_fn = lpips.LPIPS(net='vgg').cuda() # Use .cuda() if GPU is available
-dists_loss_fn = DISTS().cuda() # Use .cuda() if GPU is available
-niqe_metric = NIQE(data_range=255.0).cuda() # Initialize NIQE metric, assuming data_range 0-255
-
-# --- Helper Functions ---
-def preprocess_image_for_lpips_dists(img_np):
-    """
-    Preprocesses a NumPy image array for LPIPS and DISTS calculation.
-    Converts to torch.Tensor, permutes to (N, C, H, W), and normalizes to [-1, 1].
-    Assumes input is (H, W, C) or (H, W) and converts to (C, H, W) if needed.
-    """
-    if img_np.ndim == 2: # Grayscale image
-        img_np = np.expand_dims(img_np, axis=-1) # Add channel dimension
-    if img_np.shape[-1] == 1: # Grayscale, convert to 3 channels for LPIPS/DISTS
-        img_np = np.repeat(img_np, 3, axis=-1)
-
-    img_tensor = torch.from_numpy(img_np.astype(np.float32)).permute(2, 0, 1).unsqueeze(0)
-
-    # Normalize to [-1, 1]
-    if img_tensor.max() > 1.0: # Assuming range [0, 255]
-        img_tensor = img_tensor / 127.5 - 1.0
-    else: # Assuming range [0, 1]
-        img_tensor = img_tensor * 2.0 - 1.0
-    return img_tensor.cuda() # Use .cuda() if GPU is available
-
-def preprocess_image_for_fid(img_np):
-    """
-    Preprocesses a NumPy image array for FID calculation.
-    Converts to uint8 and ensures 3 channels.
-    """
-    if img_np.dtype != np.uint8:
-        # Clip to [0, 1] if float, then scale to [0, 255] and convert to uint8
-        if img_np.max() <= 1.0:
-            img_np = (np.clip(img_np, 0.0, 1.0) * 255).astype(np.uint8)
-        else: # Assuming range [0, 255] or similar, just convert
-            img_np = np.clip(img_np, 0, 255).astype(np.uint8)
+def load_image_tensor(filepath, target_size=None):
+    """Loads a .npy image tensor and converts it to a PyTorch tensor."""
+    img = np.load(filepath)
+    # Assuming image is HWC or HW, convert to CHW and then to PyTorch tensor
+    if img.ndim == 2:  # Grayscale
+        img = np.expand_dims(img, axis=0) # Add channel dimension
+    elif img.ndim == 3 and img.shape[2] in [1, 3]: # HWC
+        img = np.transpose(img, (2, 0, 1)) # CHW
+    elif  img.ndim == 4 and img.shape[1] in [1, 3]:
+        img = np.squeeze(img)
+        img = np.clip((img + 1) / 2, 0, 1)
+    else:
+        raise ValueError(f"Unsupported image dimensions: {img.shape}")
     
-    if img_np.ndim == 2: # Grayscale image
-        img_np = np.expand_dims(img_np, axis=-1) # Add channel dimension
-    if img_np.shape[-1] == 1: # Grayscale, convert to 3 channels
-        img_np = np.repeat(img_np, 3, axis=-1)
+    # Normalize to [-1, 1] for LPIPS, assuming original data is [0, 255] or [0, 1]
+    # If the data is already normalized to [0, 1], this will convert it to [-1, 1]
+    # If the data is [0, 255], it will be normalized to [0, 1] first, then to [-1, 1]
+    if img.max() > 1.0:
+        img = img / 255.0
     
-    return img_np
+    img_tensor = torch.from_numpy(img).float()
 
-# --- Main Processing Loop ---
-for subdir in os.listdir(base_experiment_dir):
-    subdir_path = os.path.join(base_experiment_dir, subdir)
-    if os.path.isdir(subdir_path):
-        gt_path = os.path.join(subdir_path, 'ground_truth_image.npy')
-        recon_path = os.path.join(subdir_path, 'reconstructed_image.npy')
+    if target_size:
+        # print(f"Original image tensor shape: {img_tensor.shape}")
+        resize_transform = Resize(target_size)
+        img_tensor = resize_transform(img_tensor)
+        # print(f"Resized image tensor shape: {img_tensor.shape}")
 
-        if os.path.exists(gt_path) and os.path.exists(recon_path):
-            print(f"Processing: {subdir}")
-            img_gt = np.load(gt_path)
-            img_recon = np.load(recon_path)
+    return img_tensor.unsqueeze(0) # Add batch dimension
 
-            if img_gt.shape != img_recon.shape:
-                print(f"Warning: Image dimensions do not match for {subdir}. Skipping. {img_gt.shape} vs {img_recon.shape}")
+def calculate_metrics(gt_path, recon_path, lpips_model, target_size=None): # Placeholder for H, W
+    """Calculates LPIPS, PSNR, and SSIM between ground truth and reconstruction."""
+    try:
+        gt_img_tensor = load_image_tensor(gt_path, target_size=target_size).cuda()
+        recon_img_tensor = load_image_tensor(recon_path, target_size=target_size).cuda()
+
+        # The resizing is now handled in load_image_tensor, so this block is no longer needed
+        # if gt_img_tensor.shape != recon_img_tensor.shape:
+        #     from torchvision.transforms import Resize
+        #     resize_transform = Resize(gt_img_tensor.shape[-2:])
+        #     recon_img_tensor = resize_transform(recon_img_tensor)
+
+        # LPIPS expects tensors in [-1, 1]
+        lpips_val = lpips_model(gt_img_tensor * 2. - 1., recon_img_tensor * 2. - 1.).item()
+        clipiqa_val = clipiqa(recon_img_tensor).item()
+
+        # PSNR and SSIM expect numpy arrays in [0, 1] or [0, 255]
+        # Convert back to [0, 1] range for skimage metrics
+        gt_np = (gt_img_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()).clip(0, 1)
+        recon_np = (recon_img_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()).clip(0, 1)
+
+        # Handle grayscale images for SSIM
+        if gt_np.shape[2] == 1:
+            gt_np = gt_np.squeeze(2)
+            recon_np = recon_np.squeeze(2)
+            multichannel = False
+        else:
+            multichannel = True
+
+        psnr_val = peak_signal_noise_ratio(gt_np, recon_np, data_range=1.0)
+        ssim_val = structural_similarity(gt_np, recon_np, data_range=1.0, multichannel=multichannel, channel_axis=-1 if multichannel else None)
+
+        return lpips_val, clipiqa_val, psnr_val, ssim_val
+    except Exception as e:
+        print(f"Error processing {gt_path} and {recon_path}: {e}")
+        return None, None, None, None
+
+def main():
+
+    lpips_model = lpips.LPIPS(net='vgg').cuda()
+    results = []
+
+    for task_name in os.listdir(root_dir):
+        task_dir = os.path.join(root_dir, task_name)
+        if not os.path.isdir(task_dir):
+            continue
+
+        for dataset_name in os.listdir(task_dir):
+            dataset_dir = os.path.join(task_dir, dataset_name)
+            if not os.path.isdir(dataset_dir):
                 continue
 
-            # Ensure uint8 for PSNR and SSIM
-            img_gt_uint8 = (np.clip(img_gt, 0.0, 1.0) * 255).astype(np.uint8) if img_gt.max() <= 1.0 else img_gt.astype(np.uint8)
-            img_recon_uint8 = (np.clip(img_recon, 0.0, 1.0) * 255).astype(np.uint8) if img_recon.max() <= 1.0 else img_recon.astype(np.uint8)
+            lpips_scores = []
+            clipiqa_scores = []
+            psnr_scores = []
+            ssim_scores = []
 
-            # PSNR
-            psnr_value = compare_psnr(img_gt_uint8, img_recon_uint8, data_range=255)
-            psnr_scores.append(psnr_value)
-
-            # SSIM
-            # SSIM expects (H, W) or (H, W, C). If C is 1, multichannel=False. If C > 1, multichannel=True.
-            # Ensure images are 3D (H, W, C) for multichannel=True, or 2D (H, W) for grayscale.
-            if img_gt_uint8.ndim == 2: # Grayscale
-                ssim_value = compare_ssim(img_gt_uint8, img_recon_uint8, data_range=255)
-            else: # Color
-                ssim_value = compare_ssim(img_gt_uint8, img_recon_uint8, multichannel=True, data_range=255)
-            ssim_scores.append(ssim_value)
-
-            # LPIPS and DISTS
-            img_gt_lpips_dists = preprocess_image_for_lpips_dists(img_gt)
-            img_recon_lpips_dists = preprocess_image_for_lpips_dists(img_recon)
+            image_names = [d for d in os.listdir(dataset_dir) if os.path.isdir(os.path.join(dataset_dir, d))]
             
-            lpips_value = lpips_loss_fn(img_gt_lpips_dists, img_recon_lpips_dists).item()
-            lpips_scores.append(lpips_value)
+            if not image_names:
+                print(f"No image folders found in {dataset_dir}. Skipping.")
+                continue
 
-            dists_value = dists_loss_fn(img_gt_lpips_dists, img_recon_lpips_dists).item()
-            dists_scores.append(dists_value)
+            for image_name in tqdm(image_names, desc=f"Processing {task_name}/{dataset_name}"):
+                image_dir = os.path.join(dataset_dir, image_name)
+                gt_path = os.path.join(image_dir, "gt.npy")
+                
+                reconstruction_files = [f for f in os.listdir(image_dir) if f.startswith("reconstruction_best_") and f.endswith(".npy")]
+                
+                if not os.path.exists(gt_path):
+                    print(f"Warning: gt.npy not found in {image_dir}. Skipping image.")
+                    continue
+                
+                if not reconstruction_files:
+                    reconstruction_files = [f for f in os.listdir(image_dir) if f.startswith("reconstruction_last") and f.endswith(".npy")]
+                    # print(f"Warning: No reconstruction_es_*.npy found in {image_dir}. Using the last image.")
+                    # continue
+                
+                if not reconstruction_files:
+                    reconstruction_files = [f for f in os.listdir(image_dir) if f.startswith("reconstructed") and f.endswith(".npy")]
+                    # print(f"Warning: No reconstruction_es_*.npy found in {image_dir}. Using the last image.")
+                    # continue
+                
+                # Assuming there's only one reconstruction file or we take the first one
+                recon_path = os.path.join(image_dir, reconstruction_files[0])
 
-            # Prepare images for FID (need to save to temporary directory for pytorch-fid)
-            # For simplicity, we'll collect numpy arrays and convert to PIL images later if needed for a temp dir.
-            gt_images_for_fid.append(preprocess_image_for_fid(img_gt))
-            recon_images_for_fid.append(preprocess_image_for_fid(img_recon))
+                lpips_val, clipiqa_val, psnr_val, ssim_val = calculate_metrics(gt_path, recon_path, lpips_model, target_size)
+                
+                if lpips_val is not None:
+                    lpips_scores.append(lpips_val)
+                    clipiqa_scores.append(clipiqa_val)
+                    psnr_scores.append(psnr_val)
+                    ssim_scores.append(ssim_val)
+            
+            if lpips_scores:
+                avg_lpips = np.mean(lpips_scores)
+                avg_clipiqa = np.mean(clipiqa_scores)
+                avg_psnr = np.mean(psnr_scores)
+                avg_ssim = np.mean(ssim_scores)
+                results.append({
+                    "task": task_name,
+                    "dataset": dataset_name,
+                    "lpips": avg_lpips,
+                    "clipiqa_val": avg_clipiqa,
+                    "psnr": avg_psnr,
+                    "ssim": avg_ssim
+                })
+            else:
+                print(f"No valid scores for {task_name}/{dataset_name}. Skipping.")
 
-            # Prepare images for no-reference metrics (NIQE, MUSIQ, MANIQA, CLIPIQA)
-            # For NIQE, we need a torch tensor in (N, C, H, W) format, normalized to [0, 255]
-            # The preprocess_image_for_fid already returns uint8 (0-255) and 3 channels.
-            # We just need to convert to tensor and permute.
-            img_recon_tensor_niqe = torch.from_numpy(preprocess_image_for_fid(img_recon)).permute(2, 0, 1).unsqueeze(0).cuda()
-            niqe_scores.append(niqe_metric(img_recon_tensor_niqe).item())
+    if results:
+        df = pd.DataFrame(results)
+        df.to_csv(output_csv, index=False)
+        print(f"Performance metrics saved to {output_csv}")
+    else:
+        print("No performance metrics to save.")
 
-            # For MUSIQ, MANIQA, CLIPIQA, we collect the raw numpy arrays
-            recon_images_for_no_ref_metrics.append(preprocess_image_for_fid(img_recon))
-
-# --- Calculate FID ---
-# pytorch-fid requires paths to directories of images.
-# We need to create temporary directories and save the images there.
-import tempfile
-import shutil
-
-fid_value = float('nan') # Initialize FID to NaN in case of error or no images
-
-if gt_images_for_fid and recon_images_for_fid:
-    with tempfile.TemporaryDirectory() as gt_temp_dir, \
-         tempfile.TemporaryDirectory() as recon_temp_dir:
-        
-        for i, img_np in enumerate(gt_images_for_fid):
-            img_pil = Image.fromarray(img_np)
-            img_pil.save(os.path.join(gt_temp_dir, f'gt_{i:04d}.png'))
-        
-        for i, img_np in enumerate(recon_images_for_fid):
-            img_pil = Image.fromarray(img_np)
-            img_pil.save(os.path.join(recon_temp_dir, f'recon_{i:04d}.png'))
-
-        paths = [gt_temp_dir, recon_temp_dir]
-        # Assuming default device (cuda if available, else cpu) and batch_size
-        fid_value = calculate_fid_given_paths(paths, batch_size=50, device='cuda' if torch.cuda.is_available() else 'cpu', dims=2048)
-else:
-    print("Not enough images to calculate FID.")
-
-# --- Calculate No-Reference Metrics ---
-# NIQE is calculated per image and accumulated in niqe_scores.
-# MUSIQ, MANIQA, CLIPIQA require specific pre-trained models and are not directly available
-# in standard libraries without additional setup. They are kept as placeholders.
-musiq_value = float('nan')
-maniqa_value = float('nan')
-clipiqa_value = float('nan')
-
-if not niqe_scores:
-    print("\nNot enough reconstructed images to calculate NIQE.")
-    niqe_value = float('nan')
-else:
-    niqe_value = np.mean(niqe_scores)
-
-print("\n--- No-Reference Metrics (Additional Implementations Needed) ---")
-print("MUSIQ, MANIQA, CLIPIQA: These metrics typically require specific pre-trained deep learning models and their associated libraries, which are not readily available for direct integration without further setup or installation of specialized packages. They are currently placeholders.")
-
-
-# --- Report Results ---
-print("\n--- Average Metrics ---")
-if psnr_scores:
-    print(f"Average PSNR: {np.mean(psnr_scores):.2f} dB")
-else:
-    print("PSNR: N/A (no images processed)")
-
-if ssim_scores:
-    print(f"Average SSIM: {np.mean(ssim_scores):.4f}")
-else:
-    print("SSIM: N/A (no images processed)")
-
-if lpips_scores:
-    print(f"Average LPIPS: {np.mean(lpips_scores):.4f}")
-else:
-    print("LPIPS: N/A (no images processed)")
-
-if dists_scores:
-    print(f"Average DISTS: {np.mean(dists_scores):.4f}")
-else:
-    print("DISTS: N/A (no images processed)")
-
-print(f"FID: {fid_value:.4f}")
-
-print(f"Average NIQE: {niqe_value:.4f}")
-print(f"MUSIQ: {musiq_value:.4f} (Placeholder - requires model)")
-print(f"MANIQA: {maniqa_value:.4f} (Placeholder - requires model)")
-print(f"CLIPIQA: {clipiqa_value:.4f} (Placeholder - requires model)")
+if __name__ == "__main__":
+    main()

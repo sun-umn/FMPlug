@@ -3,6 +3,7 @@ import click
 
 # first party
 from fmplug.tasks.fmplug_w_r import solve
+# from fmplug.tasks.fmplug_w_r_prompt import solve
 
 
 @click.group()

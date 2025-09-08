@@ -5,17 +5,43 @@
 #SBATCH --tmp=32g
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=wan01530@umn.edu
-#SBATCH -p apollo_agate
+#SBATCH -p msigpu
 #SBATCH --gres=gpu:a100:1
 #SBATCH --account=qzhe
 export PATH=/users/9/wan01530/miniconda3/envs/py311/bin:$PATH
 echo $PATH
 nvidia-smi
-eval "$(conda shell.bash hook)"
+# eval "$(conda shell.bash hook)"
 conda activate py311
 
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg/gaussian_blur_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg/inpainting_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg/motion_blur_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg/superresolution_config"
+
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg_prompt/gaussian_blur_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg_prompt/inpainting_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg_prompt/motion_blur_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg_prompt/superresolution_config"
+
+# python -m cli_ada_dflow run-DFlow-task --config_name="dflow/gaussian_blur_config"
+# python -m cli_ada_dflow run-DFlow-task --config_name="dflow/inpainting_config"
+# python -m cli_ada_dflow run-DFlow-task --config_name="dflow/motion_blur_config"
+# python -m cli_ada_dflow run-DFlow-task --config_name="dflow/superresolution_config"
+
+python -m cli_ada_dflow run-DFlow-task --config_name="dflow/gaussian_blur_config_noiseles_31"
+python -m cli_ada_dflow run-DFlow-task --config_name="dflow/gaussian_blur_config_noiseles_61"
+python -m cli_ada_dflow run-DFlow-task --config_name="dflow/gaussian_blur_config_noiseles_91"
+python -m cli_ada_dflow run-DFlow-task --config_name="dflow/gaussian_blur_config_noiseles_121"
+
 # python -m cli_dip run-FMPlug-task --config_name="DIP/superresolution_config"
+# python -m cli_dip run-FMPlug-task --config_name="DIP/inpainting_config"
+# python -m cli_dip run-FMPlug-task --config_name="DIP/motion_blur_config"
 # python -m cli_dip run-FMPlug-task --config_name="DIP/gaussian_blur_config"
+# python -m cli_dip run-FMPlug-task --config_name="DIP/gaussian_blur_config_noiseless_31"
+# python -m cli_dip run-FMPlug-task --config_name="DIP/gaussian_blur_config_noiseless_61"
+# python -m cli_dip run-FMPlug-task --config_name="DIP/gaussian_blur_config_noiseless_91"
+# python -m cli_dip run-FMPlug-task --config_name="DIP/gaussian_blur_config_noiseless_121"
 
 # python -m cli_ada_dflow run-FMPlug-task --config_name="workshop/superresolution_config_d"
 # python -m cli_ada_dflow run-FMPlug-task --config_name="workshop/gaussian_blur_config_d"
@@ -37,7 +63,9 @@ conda activate py311
 # python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/gaussian_blur_config"
 # python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/superresolution_config"
 
-python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/gaussian_blur_config_w_3"
+# python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/gaussian_blur_config_w_3"
+# python -m cli_ada_dgp_res run-FMPlug-task --config_name="residual/gaussian_blur_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg/gaussian_blur_config"
 # python -m cli_ada_dgp run-FMPlug-task --config_name="workshop/superresolution_config_w_3"
 
 # python -m cli run-super-resolution-task --config_name="super_resolution/config_ada_1"

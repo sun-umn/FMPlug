@@ -4,6 +4,7 @@ import inspect
 import os
 import random
 import time
+import math
 from typing import List, Optional, Union
 
 # third party
@@ -26,7 +27,7 @@ import lpips
 from fmplug.utils.measurements import get_noise, get_operator
 from fmplug.utils.tv_norm import tv_lp_loss
 from fmplug.utils.image_utils import Blurkernel, generate_tilt_map, mask_generator
-from fmplug.utils.var_es import VarianceEarlyStopping
+from fmplug.utils.var_es import VarianceEarlyStopping, MeanEarlyStopping
 import pandas as pd
 import cv2
 from torchdiffeq import odeint_adjoint as odeint
@@ -153,53 +154,7 @@ def normalize_latent(z_x: torch.Tensor, t_x: float):
     z_x = torch.sqrt(z_var / torch.var(z_x, unbiased=False)) * z_x
     return z_x
 
-def encode_prompt(self, prompt: List[str], batch_size:int=1) -> List[torch.Tensor]:
-        '''
-        We assume that
-        1. number of tokens < max_length
-        2. one prompt for one image
-        '''
-        # CLIP encode (used for modulation of adaLN-zero)
-        # now, we have two CLIPs
-        text_clip1_ids = self.tokenizer_1(prompt,
-                                          padding="max_length",
-                                          max_length=77,
-                                          truncation=True,
-                                          return_tensors='pt').input_ids
-        text_clip1_emb = self.text_enc_1(text_clip1_ids.to(self.text_enc_1.device), output_hidden_states=True)
-        pool_clip1_emb = text_clip1_emb[0].to(dtype=self.dtype, device=self.text_enc_1.device)
-        text_clip1_emb = text_clip1_emb.hidden_states[-2].to(dtype=self.dtype, device=self.text_enc_1.device)
 
-        text_clip2_ids = self.tokenizer_2(prompt,
-                                          padding="max_length",
-                                          max_length=77,
-                                          truncation=True,
-                                          return_tensors='pt').input_ids
-        text_clip2_emb = self.text_enc_2(text_clip2_ids.to(self.text_enc_2.device), output_hidden_states=True)
-        pool_clip2_emb = text_clip2_emb[0].to(dtype=self.dtype, device=self.text_enc_2.device)
-        text_clip2_emb = text_clip2_emb.hidden_states[-2].to(dtype=self.dtype, device=self.text_enc_2.device)
-
-        # T5 encode (used for text condition)
-        text_t5_ids = self.tokenizer_3(prompt,
-                                       padding="max_length",
-                                       max_length=77,
-                                       truncation=True,
-                                       add_special_tokens=True,
-                                       return_tensors='pt').input_ids
-        text_t5_emb = self.text_enc_3(text_t5_ids.to(self.text_enc_3.device))[0]
-        text_t5_emb = text_t5_emb.to(dtype=self.dtype, device=self.text_enc_3.device)
-
-
-        # Merge
-        clip_prompt_emb = torch.cat([text_clip1_emb, text_clip2_emb], dim=-1)
-        clip_prompt_emb = torch.nn.functional.pad(
-            clip_prompt_emb, (0, text_t5_emb.shape[-1] - clip_prompt_emb.shape[-1])
-        )
-        prompt_emb = torch.cat([clip_prompt_emb, text_t5_emb], dim=-2)
-        pooled_prompt_emb = torch.cat([pool_clip1_emb, pool_clip2_emb], dim=-1)
-
-        return prompt_emb, pooled_prompt_emb
-    
 def integrate(
     f,
     z,
@@ -224,7 +179,7 @@ def integrate(
     zt = z
     zt = normalize_latent(zt, temp_t)
 
-    for i in range(NFE):
+    for i in range(NFE - 1):
         
         # latent_model_input = torch.cat([zt] * 2) if do_classifier_free_guidance else zt
         latent_model_input = zt
@@ -450,6 +405,7 @@ def solve(config_name: str) -> None:
         vae.encoder.requires_grad_(False)
         vae.decoder.requires_grad_(False) # Freeze decoder initially
         vae.enable_gradient_checkpointing()
+        scheduler = pipe.scheduler
 
         prompt_2 = None
         prompt_3 = None
@@ -471,29 +427,30 @@ def solve(config_name: str) -> None:
         # encode prompt
         print("Encode prompt ...")
         with torch.no_grad():
-            (
-                prompt_embeds,
-                negative_prompt_embeds,
-                pooled_prompt_embeds,
-                negative_pooled_prompt_embeds,
-            ) = prompt_encoder(
-                prompt=prompt,
-                prompt_2=prompt_2,
-                prompt_3=prompt_3,
-                negative_prompt=negative_prompt,
-                negative_prompt_2=negative_prompt_2,
-                negative_prompt_3=negative_prompt_3,
-                do_classifier_free_guidance=do_classifier_free_guidance,
-                prompt_embeds=prompt_embeds,
-                negative_prompt_embeds=negative_prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
-                device=device,
-                clip_skip=clip_skip,
-                num_images_per_prompt=num_images_per_prompt,
-                max_sequence_length=max_sequence_length,
-                lora_scale=lora_scale,
-            )
+            with torch.amp.autocast("cuda", dtype=data_type):
+                (
+                    prompt_embeds,
+                    negative_prompt_embeds,
+                    pooled_prompt_embeds,
+                    negative_pooled_prompt_embeds,
+                ) = prompt_encoder(
+                    prompt=prompt,
+                    prompt_2=prompt_2,
+                    prompt_3=prompt_3,
+                    negative_prompt=negative_prompt,
+                    negative_prompt_2=negative_prompt_2,
+                    negative_prompt_3=negative_prompt_3,
+                    do_classifier_free_guidance=do_classifier_free_guidance,
+                    prompt_embeds=prompt_embeds,
+                    negative_prompt_embeds=negative_prompt_embeds,
+                    pooled_prompt_embeds=pooled_prompt_embeds,
+                    negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+                    device=device,
+                    clip_skip=clip_skip,
+                    num_images_per_prompt=num_images_per_prompt,
+                    max_sequence_length=max_sequence_length,
+                    lora_scale=lora_scale,
+                )
 
         # prompt embeds with classifier free guidance
         prompt_embedding = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
@@ -518,44 +475,97 @@ def solve(config_name: str) -> None:
         def decode(z: torch.Tensor) -> torch.Tensor:
             z = (z/vae.config.scaling_factor) + vae.config.shift_factor
             return vae.decode(z, return_dict=False)[0]
+
+
+        def inversion(src_img, prompts: List[str], NFE:int, cfg_scale: float=1.0, batch_size: int=1,
+                    prompt_emb:Optional[List[torch.Tensor]]=None,
+                    null_emb:Optional[List[torch.Tensor]]=None):
+            with torch.no_grad():
+                z = encode(src_img).to(transformer.device)
+
+            # timesteps (default option. You can make your custom here.)
+            scheduler.set_timesteps(28, device=transformer.device)
+            timesteps = scheduler.timesteps  # 1-D tensor
+            # append a final zero timestep (keep dtype consistent), then reverse as a tensor
+            timesteps = torch.cat([timesteps, torch.zeros(1, dtype=timesteps.dtype, device=transformer.device)])
+            timesteps = timesteps.flip(0)  # same as [::-1], keeps it a tensor
+
+            # compute sigmas as float tensor
+            sigmas = timesteps.to(torch.float32) / float(scheduler.config.num_train_timesteps)
+
+            # Solve ODE
+            for i in range(len(timesteps) - 1):  # we use i and i+1 below, so stop at len-1
+                t = timesteps[i]
+                # Make sure timestep is exactly shape (batch,) and 1D
+                timestep = t.unsqueeze(0).expand(z.shape[0]).long().to(transformer.device)
+
+                # debug prints (remove or keep as needed)
+                # print("z: ", z.shape)
+                # print("timestep: ", timestep, " shape:", timestep.shape)
+
+                with torch.no_grad():
+                    noise_pred = transformer(
+                                            hidden_states=z,
+                                            timestep=timestep,
+                                            encoder_hidden_states=prompt_embedding,
+                                            pooled_projections=pooled_embedding,
+                                            joint_attention_kwargs=None,
+                                            return_dict=False,
+                                        )[0]
+                    if do_classifier_free_guidance:
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                        noise_pred = noise_pred_uncond + guidance_scale * (
+                            noise_pred_text - noise_pred_uncond
+                        )
+                    else:
+                        noise_pred, noise_pred_text = noise_pred.chunk(2)
+
+                sigma = sigmas[i]
+                sigma_next = sigmas[i+1]
+
+                z = z + (sigma_next - sigma) * noise_pred
+
+            return z
+
+        # def inversion(src_img, prompts: List[str], NFE:int, cfg_scale: float=1.0, batch_size: int=1,
+        #           prompt_emb:Optional[List[torch.Tensor]]=None,
+        #           null_emb:Optional[List[torch.Tensor]]=None):
+        #     with torch.no_grad():
+        #         z = encode(src_img).to(transformer.device)
+
+        #     # timesteps (default option. You can make your custom here.)
+        #     scheduler.set_timesteps(28, device=transformer.device)
+        #     timesteps = scheduler.timesteps
+        #     timesteps = torch.cat([timesteps, torch.zeros(1, device=transformer.device)])
+        #     timesteps = reversed(timesteps)
+        #     print("timesteps: ", timesteps)
+        #     sigmas = timesteps / scheduler.config.num_train_timesteps
+
+        #     # Solve ODE
+        #     for i, t in enumerate(timesteps[:]):
+        #         timestep = t.expand(z.shape[0]).to(transformer.device)
+        #         # timestep = timestep.expand(z.shape[0])
+        #         print("z: ", z.shape)
+        #         print("timestep: ", timestep)
+        #         print("len(timestep.shape): ", len(timestep.shape))
+        #         with torch.no_grad():
+        #             noise_pred = transformer(z, timestep, prompt_embedding, pooled_embedding)
+        #             if do_classifier_free_guidance:
+        #                 noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+        #                 noise_pred = noise_pred_uncond + guidance_scale * (
+        #                     noise_pred_text - noise_pred_uncond
+        #                 )
+
+        #             else:
+        #                 noise_pred, noise_pred_text = noise_pred.chunk(2)
+
+        #         sigma = sigmas[i]
+        #         sigma_next = sigmas[i+1]
+
+        #         z = z + (sigma_next - sigma) * noise_pred
+
+        #     return z
         
-        # class ReverseFlow(torch.nn.Module):
-        #     def __init__(self, model):
-        #         super().__init__()
-        #         self.flow_model = model  # SD3 transformer model
-        #         self.flow_model.to(torch.float32)  # Ensure model is in float32 for stability
-
-        #     def forward(self, t, z):
-        #         """
-        #         Args:
-        #             t: scalar tensor (float), shape [] or [1]
-        #             z: latent, shape (batch, dim)
-        #         Returns:
-        #             dz/dt
-        #         """
-        #         # flow_z = torch.cat([z] * 2).to(torch.float32) if do_classifier_free_guidance else z.to(torch.float32)
-        #         print("z.shape: ", z.shape)
-        #         flow_z = z.to(torch.float32)
-        #         flow_t = t.expand(flow_z.shape[0]).to(torch.float32)
-        #         flow_prompt_embedding = prompt_embedding.to(torch.float32)  # Ensure prompt_embedding is in float32
-        #         flow_pooled_embedding = pooled_embedding.to(torch.float32)  # Ensure pooled_embedding is in float32
-        #         # Pass z and timestep to transformer
-        #         dzdt = self.flow_model(
-        #                     hidden_states=flow_z,
-        #                     timestep=flow_t,
-        #                     encoder_hidden_states=flow_prompt_embedding,
-        #                     pooled_projections=flow_pooled_embedding,
-        #                     return_dict=False,
-        #                     )
-        #         print("dzdt: ", dzdt.shape)
-        #         dzdt = dzdt[0]
-        #         print("dzdt[0]: ", dzdt.shape)
-        #         return -dzdt  # reverse flow
-
-        
-        # reverse_flow = ReverseFlow(transformer)
-        # t_forward = torch.tensor([1000.0, 0.0], device=device)
-
         early_stop_indicator = VarianceEarlyStopping(es_window_size, es_patience, es_min_epochs, es_delta)
 
         # initialize latent
@@ -574,13 +584,14 @@ def solve(config_name: str) -> None:
         img = img.to(device)
         with torch.no_grad():
             # if "super_resolution" in task:
-                # blur = transforms.GaussianBlur(kernel_size=7, sigma=1.0)
-                # z = encode(blur(img))
+            #     blur = transforms.GaussianBlur(kernel_size=7, sigma=1.0)
+            #     z = encode(img)
             # else:
+            #     z = encode(img)
+            with torch.amp.autocast("cuda", dtype=data_type):
+                z = inversion(img, [prompt], NFE=NFE, cfg_scale=guidance_scale, batch_size=1)
                 # z = encode(img)
-            z = encode(img)
-            # z = odeint(reverse_flow, z, t_forward, method='rk4')[-1]  # or 'dopri5'
-            z = alpha * z + (1 - alpha) * torch.randn_like(z)
+                z = math.sqrt(alpha) * z + math.sqrt(1 - alpha) * torch.randn_like(z)
             # z = z.detach()
         
         del img
@@ -589,7 +600,7 @@ def solve(config_name: str) -> None:
         z = torch.nn.parameter.Parameter(z, True).to(device)
         z = z.requires_grad_(True)
         # t_ada = torch.tensor(12.0 * (1.0 - alpha) - 6.0).to(device)
-        t_ada = torch.tensor(-10.0).to(device)
+        t_ada = torch.tensor(-12.0).to(device)
         # t_ada = torch.tensor(-1.0).to(device)
         # t_ada = t_ada.requires_grad_(True)
 
@@ -653,25 +664,12 @@ def solve(config_name: str) -> None:
             num_decoder_blocks = len(decoder_blocks)
             
             
-            # unfreeze_schedule = [
-            #                     vae.decoder.conv_in,
-            #                     vae.decoder.mid_block,
-            #                     vae.decoder.up_blocks[0],
-            #                     vae.decoder.up_blocks[1],
-            #                     vae.decoder.up_blocks[2],
-            #                     vae.decoder.up_blocks[3],
-            #                     vae.decoder.conv_norm_out,
-            #                     vae.decoder.conv_act,
-            #                     vae.decoder.conv_out,
-            #                 ]
-
-            
             # Initialize optimizer with z and t_ada, no decoder params initially
             optimizer = torch.optim.AdamW([params_group1])
             
 
         elif optimizer_select == "lbfgs":
-            optimizer_z = torch.optim.LBFGS([z], lr=lr[0], max_iter=20, history_size=20, line_search_fn="strong_wolfe")
+            optimizer_z = torch.optim.LBFGS([z], lr=lr, max_iter=20, history_size=20, line_search_fn="strong_wolfe")
             # optimizer_t = torch.optim.LBFGS([t_ada], lr=lr_t_ada, max_iter=50, history_size=50, line_search_fn="strong_wolfe")
         
 
@@ -706,7 +704,7 @@ def solve(config_name: str) -> None:
                 loss = criterion(operator_decoded_output, y_n)
                 # loss = criterion(decoded_output, ref_img)
                 # encoded = vae.encode(decoded_output).latent_dist.sample()
-                loss += vae_weight * (z**2 / 2).mean()
+                loss += vae_weight * chi_regularization_tensor(z)
                 loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
                 # loss += lpips_weight * lpips_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0).mean()
                 loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
@@ -865,7 +863,7 @@ def solve(config_name: str) -> None:
                     df_new.to_csv(log_path, mode='w', header=True, index=False)
                 
                 if early_stop_indicator.get_flag() == False:
-                    early_stop_indicator.update(loss.item() / loss_multiplier, output_numpy)
+                    early_stop_indicator.update(mse_score, output_numpy)
                 else:
                     # min_index = min(range(len(early_stop_indicator.get_losses())), key=lambda i: losses[i])
                     min_index = es_window_size - es_patience - 1
