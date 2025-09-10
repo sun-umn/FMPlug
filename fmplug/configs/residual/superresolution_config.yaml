@@ -10,18 +10,18 @@ measurement:
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024/"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-OT-FMPlug-W-R-Res"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-OT-FMPlug-W-R-Double-Res"
   img_size: 512
 
   method: "heun2"
   alpha: 0.8
-  t_end: 8.9286
+  t_end: 0.0
   NFE: 3
   batch_size: 1
   guidance_scale: 0.0
-  lr: [0.5, 0.2, 0.1, 0.05]
+  lr_z: [0.5]
+  lr_y: [0.1]
   lr_dec: []
-  lr_t_ada: 0.01
   lr_alpha_ada: 0.005
   decay_factor: 1.0
   epochs: 1000
@@ -37,6 +37,6 @@ fmplug:
   es_window_size: 50
   es_patience: 25
   es_min_epochs: 100
-  es_delta: 0.00000001
+  es_delta: 0.0000000001
 
   finetune_decoder_blocks_interval: 100

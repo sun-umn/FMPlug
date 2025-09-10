@@ -589,9 +589,9 @@ def solve(config_name: str) -> None:
             # else:
             #     z = encode(img)
             with torch.amp.autocast("cuda", dtype=data_type):
-                z = inversion(img, [prompt], NFE=NFE, cfg_scale=guidance_scale, batch_size=1)
-                # z = encode(img)
-                z = math.sqrt(alpha) * z + math.sqrt(1 - alpha) * torch.randn_like(z)
+                # z = inversion(img, [prompt], NFE=NFE, cfg_scale=guidance_scale, batch_size=1)
+                z = encode(img)
+                z = alpha * z + (1 - alpha) * torch.randn_like(z)
             # z = z.detach()
         
         del img

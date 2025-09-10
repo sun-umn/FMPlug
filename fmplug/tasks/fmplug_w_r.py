@@ -44,9 +44,12 @@ reg_net = MeanVarPredictor(in_channels=16)
 reg_net.load_state_dict(torch.load("best_meanvar_model.pth", map_location=device))
 reg_net.to(device).eval()
 
+for param in reg_net.parameters():
+    param.requires_grad = False
+
 # Global variables for wandb
 API_KEY = "bb47140c09574b488dcf0bc3d92f09d93b6241ce"
-PROJECT_NAME = "FMPlug-Ada-DGP-ES"
+PROJECT_NAME = "FMPlug-W-R"
 
 # Enable wandb
 print("Initialize Project ...")
@@ -159,17 +162,19 @@ def visualize_image(ref: np.array, y_n: np.array, output: np.array, save_file_na
     plt.close()
 
 
-def gauss_sphere_reg(z):
-    # with torch.no_grad():
-    #     if torch.norm(z, p=2) < 0.975 * math.sqrt(z.numel()):
-    #         z.data = z / torch.norm(z, p=2) * math.sqrt(z.numel()) * 0.975
-    #     elif torch.norm(z, p=2) > 1.025 * math.sqrt(z.numel()):
-    #         z.data = z / torch.norm(z, p=2) * math.sqrt(z.numel()) * 1.025
-    if torch.norm(z, p=2) < 0.975 * math.sqrt(z.numel()):
-        prjected_z = z / torch.norm(z, p=2) * math.sqrt(z.numel()) * 0.975
-    elif torch.norm(z, p=2) > 1.025 * math.sqrt(z.numel()):
-        prjected_z = z / torch.norm(z, p=2) * math.sqrt(z.numel()) * 1.025
-    return prjected_z
+def gauss_sphere_reg(z, low=0.975, high=1.025):
+    with torch.no_grad():
+        norm = torch.norm(z, p=2)
+        target = math.sqrt(z.numel())
+
+        if norm < low * target:
+            z.data = z / norm * target * low
+        elif norm > high * target:
+            z.data = z / norm * target * high
+        else:
+            z.data = z
+    return z
+
 
 def normalize_latent(z_x: torch.Tensor, t_x: torch.Tensor, eps=1e-6) -> torch.Tensor:
     """
@@ -225,8 +230,8 @@ def integrate(
     pooled_prompt_embedding,
     device,
     guidance_scale: float = 7.0,
-    method: str = "heun2"):
-    
+    method: str = "heun2"
+):
     do_classifier_free_guidance = guidance_scale > 1.0
     # print("t: ", t)
     # print("NFE: ", NFE)
@@ -253,22 +258,39 @@ def integrate(
                 pooled_embedding=pooled_prompt_embedding,
                 device=device,
             )
+            if do_classifier_free_guidance:
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (
+                    noise_pred_text - noise_pred_uncond
+                )
+
+            else:
+                noise_pred, noise_pred_text = noise_pred.chunk(2)
 
         elif method == 'heun2':
             dt = sigma_next - sigma
-            k1 = f(
+            temp_k1 = f(
                 x=latent_model_input,
                 t=time_step,
                 prompt_embedding=prompt_embedding,
                 pooled_embedding=pooled_prompt_embedding,
                 device=device,
             )
+            
+            if do_classifier_free_guidance:
+                noise_pred_uncond, noise_pred_text = temp_k1.chunk(2)
+                k1 = noise_pred_uncond + guidance_scale * (
+                    noise_pred_text - noise_pred_uncond
+                )
+
+            else:
+                k1, noise_pred_text = temp_k1.chunk(2)
 
             # Predict next latent using Euler step
             x1_pred = latent_model_input + dt * k1
 
             # k2
-            k2 = f(
+            temp_k2 = f(
                 x=x1_pred,
                 t=time_step_next,
                 prompt_embedding=prompt_embedding,
@@ -276,17 +298,19 @@ def integrate(
                 device=device,
             )
             
+            if do_classifier_free_guidance:
+                noise_pred_uncond, noise_pred_text = temp_k2.chunk(2)
+                k2 = noise_pred_uncond + guidance_scale * (
+                    noise_pred_text - noise_pred_uncond
+                )
+
+            else:
+                k2, noise_pred_text = temp_k2.chunk(2)
+            
             # Heun2 step (average slope)
             noise_pred = 0.5 * dt * (k1 + k2)
 
-        if do_classifier_free_guidance:
-            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + guidance_scale * (
-                noise_pred_text - noise_pred_uncond
-            )
-
-        else:
-            noise_pred, noise_pred_text = noise_pred.chunk(2)
+            
 
         # Update step for euler
         # prev_sample = sample + dt * noise_pred
@@ -569,7 +593,7 @@ def solve(config_name: str) -> None:
        
         
         z = torch.randn_like(latent_y)
-        z = z / torch.norm(z, p=2) * math.sqrt(z.numel())
+        # z = gauss_sphere_reg(z) if is_gauss_reg else z
         z = torch.nn.parameter.Parameter(z, True).to(device)
         z = z.requires_grad_(True)
         # t_ada = torch.tensor(12.0 * (1.0 - alpha) - 6.0).to(device)
@@ -678,12 +702,10 @@ def solve(config_name: str) -> None:
         # total_start_time = time.time()
 
         for iterator in tqdm.tqdm(range(epochs)):
-            if is_gauss_reg:
-                # with torch.no_grad():
-                #     z.data = z / torch.norm(z, p=2) * math.sqrt(z.numel())
-                prjected_z = gauss_sphere_reg(z) # TODO: randomness for stability
-            else:
-                prjected_z = z
+            
+            
+            z = gauss_sphere_reg(z) if is_gauss_reg else z # TODO: randomness for stability
+            # net_input = gauss_sphere_reg(z + 0.03 * torch.randn_like(z).detach()) if is_gauss_reg else z + 0.03 * torch.randn_like(z).detach()
             iter_start_time = time.time()
             # Incremental fine-tuning of VAE decoder blocks
             # if finetune_decoder_blocks_interval > 0 and iterator % finetune_decoder_blocks_interval == 0 and iterator < finetune_decoder_blocks_interval * num_decoder_blocks:
@@ -716,9 +738,9 @@ def solve(config_name: str) -> None:
                 # torch.cuda.reset_peak_memory_stats()
                 with torch.amp.autocast("cuda", dtype=data_type):
                     temp_alpha = torch.sigmoid((alpha_ada-0.5)*6)
-                    temp_z = (1-temp_alpha) * prjected_z + temp_alpha * latent_y
+                    temp_z = (1-temp_alpha) * z + temp_alpha * latent_y
                     x_t = checkpoint(checkpointed_integrate, temp_z)
-                    decoded_output = torch.sin(decode(x_t))
+                    decoded_output = decode(x_t)
 
                     if measure_config['operator']['name'] == 'inpainting':
                         operator_decoded_output = operator.forward(decoded_output, mask=mask)
@@ -726,7 +748,7 @@ def solve(config_name: str) -> None:
                         operator_decoded_output = operator.forward(decoded_output)
 
                     loss = criterion(operator_decoded_output, y_n)
-                    encoded = vae.encode(decoded_output).latent_dist.sample()
+                    encoded = encode(decoded_output)
                     loss += vae_weight * criterion(x_t, encoded)
                     loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
                     loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
@@ -770,11 +792,12 @@ def solve(config_name: str) -> None:
             
             # Evaluate
             with torch.no_grad():
+                # z_reg = gauss_sphere_reg(z) if is_gauss_reg else z
                 with torch.amp.autocast("cuda", dtype=data_type):
                     temp_alpha = torch.sigmoid((alpha_ada-0.5)*6)
                     temp_z = (1-temp_alpha) * z + temp_alpha * latent_y
                     x_t = checkpoint(checkpointed_integrate, temp_z)
-                    decoded_output = torch.sin(decode(x_t))
+                    decoded_output = decode(x_t)
                 output = decoded_output.detach().float()
                 lpips_score = lpips_loss_fn(output, ref_img).mean()
                 output_numpy = np.clip((output.cpu().squeeze().numpy() + 1) / 2, 0, 1)

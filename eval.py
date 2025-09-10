@@ -11,8 +11,8 @@ from torchvision.transforms import Resize
 
 clipiqa = CLIPIQA().cuda()
 
-root_dir = "/scratch.global/wan01530/FlowDPS/results/flowdps"
-output_csv = "/scratch.global/wan01530/FMPlug/performance_metrics_flowdps.csv"
+root_dir = "/scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-W-R-Calibrated/full_res_1"
+output_csv = "./performance_metrics_FMPlug-OT-W-R-Calibrated_1.csv"
 # target_size = (256, 256)  # Assuming target size for resizing
 target_size = None  # Assuming target size for resizing
 

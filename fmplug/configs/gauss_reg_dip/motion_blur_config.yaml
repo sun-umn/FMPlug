@@ -13,7 +13,7 @@ measurement:
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-W-R-Calibrated"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-W-R-Calibrated-DIP"
   img_size: 512
 
   method: "heun2"
@@ -37,6 +37,29 @@ fmplug:
   data_type: torch.bfloat16
   optimizer_select: "adam"
   
+  dip_in_channel: 16
+  dip_out_channel: 3
+  dip_num_channels_down: [256, 256, 256, 256, 256]
+  dip_num_channels_up: [256, 256, 256, 256, 256]
+  dip_num_channels_skip: [16, 16, 16, 16, 16]
+  dip_filter_size_down: 3
+  dip_filter_size_up: 3
+  dip_filter_skip_size: 1
+  dip_upsample_mode: "bilinear"
+  dip_need_sigmoid: False
+  dip_need_bias: True
+  dip_pad: "zero"
+  dip_act_fun: "LeakyReLU"
+
+  siren_in_features: 2
+  siren_hidden_features: 512
+  siren_out_features: 3
+  siren_hidden_layers: 3
+  siren_outermost_linear: True
+
+  dip_lr: 0.001
+  target_norm: 0.1
+
   es_window_size: 50
   es_patience: 50
   es_min_epochs: 100

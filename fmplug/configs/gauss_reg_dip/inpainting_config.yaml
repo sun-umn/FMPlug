@@ -11,7 +11,7 @@ measurement:
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-W-Calibrated"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-W-R-Calibrated-DIP"
   img_size: 512
 
   method: "heun2"
@@ -24,17 +24,40 @@ fmplug:
   lr_dec: []
   lr_t_ada: 0.01
   lr_alpha_ada: 0.005
-  decay_factor: 0.95
+  decay_factor: 1.0
   epochs: 1000
-  loss_multiplier: 1.0
+  loss_multiplier: 1000.0
   vae_weight: 0.0
   lpips_weight: 0.0
   TV_reg_weight: 0.0
-  is_gauss_reg: False
+  is_gauss_reg: True
   loss_fn: "mse"
   data_type: torch.bfloat16
   optimizer_select: "adam"
   
+  dip_in_channel: 16
+  dip_out_channel: 3
+  dip_num_channels_down: [256, 256, 256, 256, 256]
+  dip_num_channels_up: [256, 256, 256, 256, 256]
+  dip_num_channels_skip: [16, 16, 16, 16, 16]
+  dip_filter_size_down: 3
+  dip_filter_size_up: 3
+  dip_filter_skip_size: 1
+  dip_upsample_mode: "bilinear"
+  dip_need_sigmoid: False
+  dip_need_bias: True
+  dip_pad: "zero"
+  dip_act_fun: "LeakyReLU"
+
+  siren_in_features: 2
+  siren_hidden_features: 512
+  siren_out_features: 3
+  siren_hidden_layers: 3
+  siren_outermost_linear: True
+
+  dip_lr: 0.001
+  target_norm: 0.1
+
   es_window_size: 50
   es_patience: 50
   es_min_epochs: 100

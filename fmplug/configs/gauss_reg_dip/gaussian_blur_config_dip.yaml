@@ -13,7 +13,7 @@ measurement:
 
 fmplug:
   data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-W-R-Calibrated-prompt"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-W-R-Calibrated-DIP"
   img_size: 512
 
   method: "heun2"
@@ -21,10 +21,9 @@ fmplug:
   t_end: 0.00
   NFE: 3
   batch_size: 1
-  guidance_scale: 2.0
-  lr_z: [0.5, 0.2]
+  guidance_scale: 0.0
+  lr_z: [0.005]
   lr_dec: []
-  lr_t_ada: 0.01
   lr_alpha_ada: 0.005
   decay_factor: 1.0
   epochs: 1000
@@ -37,9 +36,28 @@ fmplug:
   data_type: torch.bfloat16
   optimizer_select: "adam"
   
+  residual_type: "DIP"
+
+  dip_in_channel: 16
+  dip_out_channel: 3
+  dip_num_channels_down: [256, 256, 256, 256]
+  dip_num_channels_up: [256, 256, 256, 256]
+  dip_num_channels_skip: [16, 16, 16, 16]
+  dip_filter_size_down: 3
+  dip_filter_size_up: 3
+  dip_filter_skip_size: 1
+  dip_upsample_mode: "bilinear"
+  dip_need_sigmoid: False
+  dip_need_bias: True
+  dip_pad: "zero"
+  dip_act_fun: "LeakyReLU"
+
+  dip_lr: 0.0001
+  target_norm: 0.05
+
   es_window_size: 50
   es_patience: 50
   es_min_epochs: 100
-  es_delta: 0.000000001
+  es_delta: 0.0000000001
 
   finetune_decoder_blocks_interval: 100

@@ -14,6 +14,9 @@ nvidia-smi
 # eval "$(conda shell.bash hook)"
 conda activate py311
 
+
+# python -m cli_ada_dgp_reg_hard_align_dip run-FMPlug-task --config_name="gauss_reg_dip/gaussian_blur_config"
+
 # python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg/gaussian_blur_config"
 # python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg/inpainting_config"
 # python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg/motion_blur_config"
@@ -23,6 +26,21 @@ conda activate py311
 # python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg_prompt/inpainting_config"
 # python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg_prompt/motion_blur_config"
 # python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg_prompt/superresolution_config"
+
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="no_gauss_reg/gaussian_blur_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="no_gauss_reg/inpainting_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="no_gauss_reg/motion_blur_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="no_gauss_reg/superresolution_config"
+
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="no_gauss_reg_prompt/gaussian_blur_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="no_gauss_reg_prompt/inpainting_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="no_gauss_reg_prompt/motion_blur_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="no_gauss_reg_prompt/superresolution_config"
+
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg_dgp/gaussian_blur_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg_dgp/inpainting_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg_dgp/motion_blur_config"
+# python -m cli_ada_dgp_reg_hard_align run-FMPlug-task --config_name="gauss_reg_dgp/superresolution_config"
 
 # python -m cli_ada_dflow run-DFlow-task --config_name="dflow/gaussian_blur_config"
 # python -m cli_ada_dflow run-DFlow-task --config_name="dflow/inpainting_config"

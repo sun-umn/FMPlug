@@ -22,24 +22,24 @@ fmplug:
   NFE: 3
   batch_size: 1
   guidance_scale: 0.0
-  lr_z: [0.5]
+  lr_z: [0.5, 0.2]
   lr_dec: []
   lr_t_ada: 0.01
   lr_alpha_ada: 0.005
-  decay_factor: 0.95
+  decay_factor: 1.0
   epochs: 1000
-  loss_multiplier: 1.0
+  loss_multiplier: 1000.0
   vae_weight: 0.0
   lpips_weight: 0.0
   TV_reg_weight: 0.0
-  is_gauss_reg: 
+  is_gauss_reg: True
   loss_fn: "mse"
   data_type: torch.bfloat16
   optimizer_select: "adam"
   
   es_window_size: 50
-  es_patience: 25
+  es_patience: 50
   es_min_epochs: 100
-  es_delta: 0.00000001
+  es_delta: 0.000000001
 
   finetune_decoder_blocks_interval: 100
