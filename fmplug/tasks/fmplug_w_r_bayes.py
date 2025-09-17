@@ -530,7 +530,7 @@ def solve(config_name: str) -> None:
             "stabilityai/stable-diffusion-3-medium-diffusers",
             text_encoder_3=None,
             tokenizer_3=None,
-            torch_dtype=data_type,
+            dtype=data_type,
         )
         pipe = pipe.to(device)
         # pipe.enable_model_cpu_offload()

@@ -162,7 +162,7 @@ def visualize_image(ref: np.array, y_n: np.array, output: np.array, save_file_na
     plt.close()
 
 
-def gauss_sphere_reg(z, low=0.975, high=1.025):
+def gauss_sphere_reg(z, low=0.985, high=1.015):
     with torch.no_grad():
         norm = torch.norm(z, p=2)
         target = math.sqrt(z.numel())
@@ -474,7 +474,7 @@ def solve(config_name: str) -> None:
             "stabilityai/stable-diffusion-3-medium-diffusers",
             text_encoder_3=None,
             tokenizer_3=None,
-            torch_dtype=data_type,
+            dtype=data_type,
         )
         pipe = pipe.to(device, dtype=data_type)
         # pipe.enable_model_cpu_offload()

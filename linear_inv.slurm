@@ -14,3 +14,5 @@ eval "$(conda shell.bash hook)"
 conda activate py311
 
 python -m cli_ada run-FMPlug-task --config_name="regression/lbfgs"
+python -m cli_ada_dgp_reg_hard_align_dip run-FMPlug-task --config_name="gauss_reg_dip/gaussian_blur_config_siren"
+python -m cli_ada_dgp_reg_hard_align_dip run-FMPlug-task --config_name="gauss_reg_dip/gaussian_blur_config_dip"

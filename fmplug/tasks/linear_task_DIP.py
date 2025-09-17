@@ -336,8 +336,8 @@ def solve(config_name: str) -> None:
             dip_optimizer.zero_grad()
             # torch.cuda.reset_peak_memory_stats()
             with torch.amp.autocast("cuda", dtype=data_type):
-                img_dip_rep = img_rep(img_z)
-                img_dip_rep = torch.clip(img_dip_rep, -1, 1)
+                img_dip_rep = torch.tanh(img_rep(img_z + torch.randn_like(img_z).detach() * 0.03))  # DIP output
+                # img_dip_rep = torch.clip(img_dip_rep, -1, 1)
                 if measure_config['operator']['name'] == 'inpainting':
                     operator_dip_output = operator.forward(img_dip_rep, mask=mask)
                 else:

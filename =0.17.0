@@ -1,0 +1,48 @@
+Channels:
+ - bioconda
+ - conda-forge
+ - defaults
+ - anaconda
+ - nvidia
+ - pytorch
+Platform: linux-64
+Collecting package metadata (repodata.json): ...working... done
+Solving environment: ...working... done
+
+## Package Plan ##
+
+  environment location: /users/9/wan01530/miniconda3/envs/py311
+
+  added / updated specs:
+    - peft
+
+
+The following packages will be downloaded:
+
+    package                    |            build
+    ---------------------------|-----------------
+    accelerate-1.10.1          |     pyhcf101f3_0         262 KB  conda-forge
+    peft-0.17.1                |     pyhcf101f3_0         245 KB  conda-forge
+    tokenizers-0.15.1          |  py312h22610ee_0         2.5 MB
+    transformers-4.39.3        |  py312h06a4308_0        10.1 MB
+    ------------------------------------------------------------
+                                           Total:        13.1 MB
+
+The following NEW packages will be INSTALLED:
+
+  accelerate         conda-forge/noarch::accelerate-1.10.1-pyhcf101f3_0 
+  colorama           conda-forge/noarch::colorama-0.4.6-pyhd8ed1ab_1 
+  peft               conda-forge/noarch::peft-0.17.1-pyhcf101f3_0 
+  requests           conda-forge/noarch::requests-2.32.5-pyhd8ed1ab_0 
+  setuptools         conda-forge/noarch::setuptools-80.9.0-pyhff2d567_0 
+  tokenizers         pkgs/main/linux-64::tokenizers-0.15.1-py312h22610ee_0 
+  tqdm               conda-forge/noarch::tqdm-4.67.1-pyhd8ed1ab_1 
+  transformers       pkgs/main/linux-64::transformers-4.39.3-py312h06a4308_0 
+
+The following packages will be UPDATED:
+
+  ca-certificates    conda-forge/linux-64::ca-certificates~ --> conda-forge/noarch::ca-certificates-2025.8.3-hbd8a1cb_0 
+  certifi                            2025.1.31-pyhd8ed1ab_0 --> 2025.8.3-pyhd8ed1ab_0 
+
+
+Proceed ([y]/n)? 

@@ -44,8 +44,10 @@ fmplug:
   siren_hidden_layers: 3
   siren_outermost_linear: True
 
-  dip_lr: 0.001
-  target_norm: 0.05
+  dip_lr: 0.0001
+  target_norm: 0.15
+  norm_ratio: 0.0
+  lr_norm: 0.05
 
   es_window_size: 50
   es_patience: 50

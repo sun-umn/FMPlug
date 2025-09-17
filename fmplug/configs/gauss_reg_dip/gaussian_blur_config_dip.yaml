@@ -22,7 +22,7 @@ fmplug:
   NFE: 3
   batch_size: 1
   guidance_scale: 0.0
-  lr_z: [0.005]
+  lr_z: [0.05]
   lr_dec: []
   lr_alpha_ada: 0.005
   decay_factor: 1.0
@@ -53,7 +53,9 @@ fmplug:
   dip_act_fun: "LeakyReLU"
 
   dip_lr: 0.0001
-  target_norm: 0.05
+  target_norm: 0.15
+  norm_ratio: 0.0
+  lr_norm: 0.05
 
   es_window_size: 50
   es_patience: 50

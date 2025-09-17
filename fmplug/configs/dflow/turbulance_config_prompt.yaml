@@ -1,33 +1,32 @@
 measurement:
   noise: 
     name: gaussian
-    sigma: 0.0
+    sigma: 0.03
   operator:
-    name: gaussian_blur
-    kernel_size: 121
-    intensity: 3.0
+    name: turbulence
   kernel_opt:
     kernel: gaussian
-    kernel_size: 121
+    kernel_size: 61
     intensity: 3.0
 
+    
 fmplug:
-  data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024_afhq"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-DFlow-noiseless-121"
-  img_size: 256
+  data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-DFlow"
+  img_size: 512
 
   method: "heun2"
-  alpha: 0.2
+  alpha: 0.1
   t_end: 0.00
   NFE: 3
   batch_size: 1
-  guidance_scale: 0.0
+  guidance_scale: 2.0
   lr: 1.0
   lr_dec: []
   lr_t_ada: 0.0
   lr_alpha_ada: 0.005
   decay_factor: 0.95
-  epochs: 1000
+  epochs: 30
   loss_multiplier: 1.0
   vae_weight: 0.01
   lpips_weight: 0.0
@@ -40,7 +39,7 @@ fmplug:
   es_window_size: 10
   es_patience: 5
   es_min_epochs: 20
-  es_delta: 0.01
+  es_delta: 0.000000001
 
 
   finetune_decoder_blocks_interval: 100

@@ -17,7 +17,7 @@ fmplug:
   img_size: 512
 
   method: "heun2"
-  alpha: 0.2
+  alpha: 0.1
   t_end: 0.00
   NFE: 6
   batch_size: 1
@@ -40,7 +40,7 @@ fmplug:
   es_window_size: 10
   es_patience: 5
   es_min_epochs: 20
-  es_delta: 0.01
+  es_delta: 0.0000001
 
 
   finetune_decoder_blocks_interval: 100

@@ -5,23 +5,23 @@ measurement:
   operator:
     name: gaussian_blur
     kernel_size: 61
-    intensity: 3.0
+    intensity: 4.0
   kernel_opt:
     kernel: gaussian
     kernel_size: 61
-    intensity: 3.0
+    intensity: 4.0
 
 fmplug:
-  data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024_afhq"
-  save_folder: "/scratch.global/wan01530/FMPlug/experiment-DFlow-noiseless-61"
+  data_folder: "/scratch.global/wan01530/FMPlug/stress_image"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-DFlow-noiseless-4"
   img_size: 256
 
   method: "heun2"
-  alpha: 0.2
+  alpha: 0.1
   t_end: 0.00
   NFE: 3
   batch_size: 1
-  guidance_scale: 0.0
+  guidance_scale: 2.0
   lr: 1.0
   lr_dec: []
   lr_t_ada: 0.0
@@ -40,7 +40,7 @@ fmplug:
   es_window_size: 10
   es_patience: 5
   es_min_epochs: 20
-  es_delta: 0.01
+  es_delta: 0.0000001
 
 
   finetune_decoder_blocks_interval: 100

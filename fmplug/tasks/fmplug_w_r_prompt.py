@@ -507,7 +507,7 @@ def solve(config_name: str) -> None:
         print("Load in SD3 image to image model ...")
         pipe = StableDiffusion3Pipeline.from_pretrained(
             "stabilityai/stable-diffusion-3-medium-diffusers",
-            torch_dtype=data_type,
+            dtype=data_type,
         )
         pipe = pipe.to(device)
         pipe = pipe.to(device=device, dtype=data_type)

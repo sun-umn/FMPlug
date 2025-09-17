@@ -15,7 +15,7 @@ fmplug:
   img_size: 512
 
   method: "heun2"
-  alpha: 0.2
+  alpha: 0.1
   t_end: 0.00
   NFE: 3
   batch_size: 1
@@ -25,7 +25,7 @@ fmplug:
   lr_t_ada: 0.0
   lr_alpha_ada: 0.005
   decay_factor: 0.95
-  epochs: 1000
+  epochs: 30
   loss_multiplier: 1.0
   vae_weight: 0.01
   lpips_weight: 0.0
@@ -38,7 +38,7 @@ fmplug:
   es_window_size: 10
   es_patience: 5
   es_min_epochs: 20
-  es_delta: 0.01
+  es_delta: 0.0000001
 
 
   finetune_decoder_blocks_interval: 100

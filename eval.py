@@ -4,15 +4,20 @@ import numpy as np
 import torch
 import lpips
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
-from piq import CLIPIQA
+from piq import CLIPIQA, DISTS
 import pandas as pd
 from tqdm import tqdm
 from torchvision.transforms import Resize
+import pyiqa
 
-clipiqa = CLIPIQA().cuda()
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-root_dir = "/scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-W-R-Calibrated/full_res_1"
-output_csv = "./performance_metrics_FMPlug-OT-W-R-Calibrated_1.csv"
+clipiqa = CLIPIQA().to(device)
+dists = DISTS().to(device)
+musiq = pyiqa.create_metric('musiq', device=device)
+
+root_dir = "/scratch.global/wan01530/FMPlug/experiment-DIP"
+output_csv = "./performance_metrics-DIP.csv"
 # target_size = (256, 256)  # Assuming target size for resizing
 target_size = None  # Assuming target size for resizing
 
@@ -60,7 +65,9 @@ def calculate_metrics(gt_path, recon_path, lpips_model, target_size=None): # Pla
 
         # LPIPS expects tensors in [-1, 1]
         lpips_val = lpips_model(gt_img_tensor * 2. - 1., recon_img_tensor * 2. - 1.).item()
+        dists_val = dists(recon_img_tensor * 2. - 1, gt_img_tensor * 2. - 1).item()
         clipiqa_val = clipiqa(recon_img_tensor).item()
+        musiq_val = musiq(recon_img_tensor).item()
 
         # PSNR and SSIM expect numpy arrays in [0, 1] or [0, 255]
         # Convert back to [0, 1] range for skimage metrics
@@ -78,83 +85,97 @@ def calculate_metrics(gt_path, recon_path, lpips_model, target_size=None): # Pla
         psnr_val = peak_signal_noise_ratio(gt_np, recon_np, data_range=1.0)
         ssim_val = structural_similarity(gt_np, recon_np, data_range=1.0, multichannel=multichannel, channel_axis=-1 if multichannel else None)
 
-        return lpips_val, clipiqa_val, psnr_val, ssim_val
+        return lpips_val, clipiqa_val, dists_val, musiq_val, psnr_val, ssim_val
     except Exception as e:
         print(f"Error processing {gt_path} and {recon_path}: {e}")
-        return None, None, None, None
+        return None, None, None, None, None, None
 
 def main():
 
-    lpips_model = lpips.LPIPS(net='vgg').cuda()
+    lpips_model = lpips.LPIPS(net='vgg').to(device)
     results = []
 
-    for task_name in os.listdir(root_dir):
-        task_dir = os.path.join(root_dir, task_name)
-        if not os.path.isdir(task_dir):
+    # Iterate over time folders
+    for time_name in os.listdir(root_dir):
+        time_dir = os.path.join(root_dir, time_name)
+        if not os.path.isdir(time_dir):
             continue
 
-        for dataset_name in os.listdir(task_dir):
-            dataset_dir = os.path.join(task_dir, dataset_name)
-            if not os.path.isdir(dataset_dir):
+        for task_name in os.listdir(time_dir):
+            task_dir = os.path.join(time_dir, task_name)
+            if not os.path.isdir(task_dir):
                 continue
 
-            lpips_scores = []
-            clipiqa_scores = []
-            psnr_scores = []
-            ssim_scores = []
-
-            image_names = [d for d in os.listdir(dataset_dir) if os.path.isdir(os.path.join(dataset_dir, d))]
-            
-            if not image_names:
-                print(f"No image folders found in {dataset_dir}. Skipping.")
-                continue
-
-            for image_name in tqdm(image_names, desc=f"Processing {task_name}/{dataset_name}"):
-                image_dir = os.path.join(dataset_dir, image_name)
-                gt_path = os.path.join(image_dir, "gt.npy")
-                
-                reconstruction_files = [f for f in os.listdir(image_dir) if f.startswith("reconstruction_best_") and f.endswith(".npy")]
-                
-                if not os.path.exists(gt_path):
-                    print(f"Warning: gt.npy not found in {image_dir}. Skipping image.")
+            for dataset_name in os.listdir(task_dir):
+                dataset_dir = os.path.join(task_dir, dataset_name)
+                if not os.path.isdir(dataset_dir):
                     continue
-                
-                if not reconstruction_files:
-                    reconstruction_files = [f for f in os.listdir(image_dir) if f.startswith("reconstruction_last") and f.endswith(".npy")]
-                    # print(f"Warning: No reconstruction_es_*.npy found in {image_dir}. Using the last image.")
-                    # continue
-                
-                if not reconstruction_files:
-                    reconstruction_files = [f for f in os.listdir(image_dir) if f.startswith("reconstructed") and f.endswith(".npy")]
-                    # print(f"Warning: No reconstruction_es_*.npy found in {image_dir}. Using the last image.")
-                    # continue
-                
-                # Assuming there's only one reconstruction file or we take the first one
-                recon_path = os.path.join(image_dir, reconstruction_files[0])
 
-                lpips_val, clipiqa_val, psnr_val, ssim_val = calculate_metrics(gt_path, recon_path, lpips_model, target_size)
+                lpips_scores = []
+                clipiqa_scores = []
+                dists_scores = []
+                musiq_scores = []
+                psnr_scores = []
+                ssim_scores = []
+
+                image_names = [d for d in os.listdir(dataset_dir) if os.path.isdir(os.path.join(dataset_dir, d))]
                 
-                if lpips_val is not None:
-                    lpips_scores.append(lpips_val)
-                    clipiqa_scores.append(clipiqa_val)
-                    psnr_scores.append(psnr_val)
-                    ssim_scores.append(ssim_val)
-            
-            if lpips_scores:
-                avg_lpips = np.mean(lpips_scores)
-                avg_clipiqa = np.mean(clipiqa_scores)
-                avg_psnr = np.mean(psnr_scores)
-                avg_ssim = np.mean(ssim_scores)
-                results.append({
-                    "task": task_name,
-                    "dataset": dataset_name,
-                    "lpips": avg_lpips,
-                    "clipiqa_val": avg_clipiqa,
-                    "psnr": avg_psnr,
-                    "ssim": avg_ssim
-                })
-            else:
-                print(f"No valid scores for {task_name}/{dataset_name}. Skipping.")
+                if not image_names:
+                    print(f"No image folders found in {dataset_dir}. Skipping.")
+                    continue
+
+                for image_name in tqdm(image_names, desc=f"Processing {time_name}/{task_name}/{dataset_name}"):
+                    image_dir = os.path.join(dataset_dir, image_name)
+                    gt_path = os.path.join(image_dir, "gt.npy")
+                    
+                    reconstruction_files = [f for f in os.listdir(image_dir) if f.startswith("reconstruction_best_") and f.endswith(".npy")]
+                    
+                    if not os.path.exists(gt_path):
+                        print(f"Warning: gt.npy not found in {image_dir}. Skipping image.")
+                        continue
+                    
+                    if not reconstruction_files:
+                        reconstruction_files = [f for f in os.listdir(image_dir) if f.startswith("reconstruction_last") and f.endswith(".npy")]
+                    
+                    if not reconstruction_files:
+                        reconstruction_files = [f for f in os.listdir(image_dir) if f.startswith("reconstructed") and f.endswith(".npy")]
+                    
+                    if not reconstruction_files:
+                        print(f"No reconstruction files found in {image_dir}. Skipping image.")
+                        continue
+                    
+                    recon_path = os.path.join(image_dir, reconstruction_files[0])
+
+                    lpips_val, clipiqa_val, dists_val, musiq_val, psnr_val, ssim_val = calculate_metrics(gt_path, recon_path, lpips_model, target_size)
+                    
+                    if lpips_val is not None:
+                        lpips_scores.append(lpips_val)
+                        clipiqa_scores.append(clipiqa_val)
+                        dists_scores.append(dists_val)
+                        musiq_scores.append(musiq_val)
+                        psnr_scores.append(psnr_val)
+                        ssim_scores.append(ssim_val)
+                
+                if lpips_scores:
+                    avg_lpips = np.mean(lpips_scores)
+                    avg_clipiqa = np.mean(clipiqa_scores)
+                    avg_dists = np.mean(dists_scores)
+                    avg_musiq = np.mean(musiq_scores)
+                    avg_psnr = np.mean(psnr_scores)
+                    avg_ssim = np.mean(ssim_scores)
+                    results.append({
+                        "time": time_name,
+                        "task": task_name,
+                        "dataset": dataset_name,
+                        "psnr": avg_psnr,
+                        "ssim": avg_ssim,
+                        "lpips": avg_lpips,
+                        "dists": avg_dists,
+                        "clipiqa": avg_clipiqa,
+                        "musiq": avg_musiq,
+                    })
+                else:
+                    print(f"No valid scores for {time_name}/{task_name}/{dataset_name}. Skipping.")
 
     if results:
         df = pd.DataFrame(results)
@@ -162,6 +183,7 @@ def main():
         print(f"Performance metrics saved to {output_csv}")
     else:
         print("No performance metrics to save.")
+
 
 if __name__ == "__main__":
     main()

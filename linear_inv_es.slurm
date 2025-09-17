@@ -12,6 +12,11 @@ echo $PATH
 nvidia-smi
 eval "$(conda shell.bash hook)"
 conda activate py311
+
+python -m cli_ada_dgp_reg_hard_align_prompt run-FMPlug-task --config_name="gauss_reg_prompt_tune/gaussian_blur_config"
+python -m cli_ada_dgp_reg_hard_align_prompt run-FMPlug-task --config_name="gauss_reg_prompt_tune/inpainting_config"
+
+
 # python -m cli run-super-resolution-task --config_name="super_resolution/config_ada_1"
 # python -m cli run-super-resolution-task --config_name="super_resolution/config_ada_2"
 # python -m cli run-super-resolution-task --config_name="super_resolution/config_ada_3"

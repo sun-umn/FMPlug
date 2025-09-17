@@ -1,0 +1,46 @@
+measurement:
+  noise: 
+    name: gaussian
+    sigma: 0.03
+  operator:
+    name: motion_blur
+    kernel_size: 61
+    intensity: 0.5
+  kernel_opt: 
+    kernel: motion
+    kernel_size: 61
+    intensity: 0.5
+
+fmplug:
+  data_folder: "/scratch.global/wan01530/FMPlug/dataset_deg_1024"
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-DFlow_prompt"
+  img_size: 512
+
+  method: "heun2"
+  alpha: 0.1
+  t_end: 0.00
+  NFE: 3
+  batch_size: 1
+  guidance_scale: 2.0
+  lr: 1.0
+  lr_dec: []
+  lr_t_ada: 0.0
+  lr_alpha_ada: 0.005
+  decay_factor: 0.95
+  epochs: 1000
+  loss_multiplier: 1.0
+  vae_weight: 0.01
+  lpips_weight: 0.0
+  TV_reg_weight: 0.0
+  is_gauss_reg: True
+  loss_fn: "mse"
+  data_type: torch.bfloat16
+  optimizer_select: "lbfgs"
+  
+  es_window_size: 10
+  es_patience: 5
+  es_min_epochs: 20
+  es_delta: 0.0000001
+
+
+  finetune_decoder_blocks_interval: 100

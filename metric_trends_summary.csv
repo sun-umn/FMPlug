@@ -1,0 +1,3 @@
+metric,rho_mean_vs_level,pval_mean_vs_level,rho_ci_vs_level,pval_ci_vs_level,task
+SSIM,-1.0,0.0,-0.39999999999999997,0.6,gaussian_blur
+LPIPS,1.0,0.0,-0.39999999999999997,0.6,gaussian_blur

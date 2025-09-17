@@ -250,10 +250,10 @@ def integrate(
     sigma_next = temp_t_next / 1000
     zt = z
     zt = normalize_latent(zt, temp_t)
+    latent_model_input = torch.cat([zt] * 2) if do_classifier_free_guidance else zt
 
     for i in range(NFE):
         
-        latent_model_input = zt
         time_step = temp_t.expand(latent_model_input.shape[0])
         time_step_next = temp_t_next.expand(latent_model_input.shape[0])
         if method == 'euler':
@@ -394,6 +394,8 @@ def solve(config_name: str) -> None:
     
     target_norm = fmplug_config["target_norm"]
     dip_lr = fmplug_config["dip_lr"]
+    norm_ratio = fmplug_config["norm_ratio"]
+    lr_norm = fmplug_config["lr_norm"]
     
     
     es_window_size = fmplug_config["es_window_size"]
@@ -639,6 +641,8 @@ def solve(config_name: str) -> None:
         alpha_ada = torch.tensor(alpha).to(device)
         alpha_ada = alpha_ada.requires_grad_(True)
         t_ada = (1 - torch.sigmoid((alpha_ada-0.5)*6))
+        norm_ratio = torch.tensor(norm_ratio).to(device)
+        norm_ratio = norm_ratio.requires_grad_(True)
         
         if residual_type == "DIP":
             img_z = torch.randn(1, dip_in_channel, image_size, image_size, device=device, dtype=data_type).to(device).requires_grad_(False)
@@ -720,6 +724,7 @@ def solve(config_name: str) -> None:
             params_group1 = {'params': [z], 'lr': lr_z[0]}
             params_group2 = {'params': alpha_ada, 'lr': lr_alpha_ada}
             params_group3 = {'params': img_rep.parameters(), 'lr': dip_lr}
+            params_group4 = {'params': norm_ratio, 'lr': lr_norm}
 
             
             # Get decoder blocks for incremental fine-tuning
@@ -741,7 +746,7 @@ def solve(config_name: str) -> None:
 
             
             # Initialize optimizer with z and t_ada, no decoder params initially
-            optimizer = torch.optim.AdamW([params_group1, params_group2, params_group3])
+            optimizer = torch.optim.AdamW([params_group1, params_group2, params_group3, params_group4])
             # t_ada = 1 - alpha_ada  # Initialize t_ada as 1 - alpha_ada
             
         
@@ -838,7 +843,7 @@ def solve(config_name: str) -> None:
                     decoded_output = decode(x_t)
 
                     img_residual = torch.tanh(img_rep(img_z).reshape(decoded_output.shape))
-                    img_residual = img_residual / torch.norm(img_residual) * target_norm * torch.norm(decoded_output)
+                    img_residual = img_residual / torch.norm(img_residual) * target_norm * torch.norm(decoded_output) * torch.cos(norm_ratio)
 
                     
                     if measure_config['operator']['name'] == 'inpainting':

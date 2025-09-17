@@ -162,7 +162,7 @@ def visualize_image(ref: np.array, y_n: np.array, output: np.array, save_file_na
     plt.close()
 
 
-def gauss_sphere_reg(z, low=0.975, high=1.025):
+def gauss_sphere_reg(z, low=0.985, high=1.015):
     with torch.no_grad():
         norm = torch.norm(z, p=2)
         target = math.sqrt(z.numel())
@@ -199,10 +199,17 @@ def normalize_latent(z_x: torch.Tensor, t_x: torch.Tensor, eps=1e-6) -> torch.Te
     # compute current statistics
     cur_mean = z_x.mean(dim=list(range(1, z_x.dim())), keepdim=True)
     cur_var  = z_x.var(dim=list(range(1, z_x.dim())), unbiased=False, keepdim=True)
+    
+    alpha = 0.5  # blend factor
+    target_mean = alpha * z_mean + (1 - alpha) * cur_mean.squeeze()
+    target_var  = alpha * z_var  + (1 - alpha) * cur_var.squeeze()
 
-    # normalize
-    normalized = (z_x - cur_mean) / torch.sqrt(cur_var + eps)
-    z_calibrated = normalized * torch.sqrt(z_var + eps) + z_mean
+    normalized  = (z_x - cur_mean) / torch.sqrt(cur_var + eps)
+    z_calibrated = normalized * torch.sqrt(target_var + eps) + target_mean
+
+    # # normalize
+    # normalized = (z_x - cur_mean) / torch.sqrt(cur_var + eps)
+    # z_calibrated = normalized * torch.sqrt(z_var + eps) + z_mean
     return z_calibrated
     
     # z_var = reg(t_x.detach().cpu().float().numpy()) * (1 + np.random.randn() * 0.02)
@@ -228,6 +235,7 @@ def integrate(
     NFE,
     prompt_embedding,
     pooled_prompt_embedding,
+    is_calibrate,
     device,
     guidance_scale: float = 7.0,
     method: str = "heun2"
@@ -243,11 +251,13 @@ def integrate(
     sigma = temp_t / 1000
     sigma_next = temp_t_next / 1000
     zt = z
-    zt = normalize_latent(zt, temp_t)
+    if is_calibrate:
+        zt = normalize_latent(zt, temp_t)
+        
+    latent_model_input = torch.cat([zt] * 2) if do_classifier_free_guidance else zt
 
     for i in range(NFE):
         
-        latent_model_input = zt
         time_step = temp_t.expand(latent_model_input.shape[0])
         time_step_next = temp_t_next.expand(latent_model_input.shape[0])
         if method == 'euler':
@@ -360,6 +370,7 @@ def solve(config_name: str) -> None:
     lpips_weight = fmplug_config["lpips_weight"]
     TV_reg_weight = fmplug_config["TV_reg_weight"]
     is_gauss_reg = fmplug_config["is_gauss_reg"]
+    is_calibrate = fmplug_config["is_calibrate"]
     t_end = fmplug_config["t_end"]
     data_type = eval(fmplug_config["data_type"])
     optimizer_select = fmplug_config["optimizer_select"]
@@ -472,7 +483,7 @@ def solve(config_name: str) -> None:
             "stabilityai/stable-diffusion-3-medium-diffusers",
             text_encoder_3=None,
             tokenizer_3=None,
-            torch_dtype=data_type,
+            dtype=data_type,
         )
         pipe = pipe.to(device, dtype=data_type)
         # pipe.enable_model_cpu_offload()
@@ -630,7 +641,7 @@ def solve(config_name: str) -> None:
                 NFE,
                 prompt_embedding,
                 pooled_embedding,
-                device,
+                is_calibrate, device,
                 guidance_scale=guidance_scale,
                 method=method
             )
@@ -659,6 +670,14 @@ def solve(config_name: str) -> None:
             params_group1 = {'params': z, 'lr': lr_z[0]}
             # params_group2 = {'params': t_ada, 'lr': lr_t_ada}
             params_group2 = {'params': alpha_ada, 'lr': lr_alpha_ada}
+            optimizer = torch.optim.AdamW([params_group1, params_group2])
+            
+            if not is_calibrate:
+                res_y = torch.nn.parameter.Parameter(latent_y.detach().clone(), True).to(device)
+                res_y = res_y.requires_grad_(True)
+                params_group3 = {'params': res_y, 'lr': lr_z[0]/1E3}
+                optimizer = torch.optim.AdamW([params_group1, params_group2, params_group3])
+                
             
             # Get decoder blocks for incremental fine-tuning
             decoder_blocks = list(vae.decoder.up_blocks) # Assuming decoder blocks are in vae.decoder.up_blocks
@@ -679,7 +698,6 @@ def solve(config_name: str) -> None:
 
             
             # Initialize optimizer with z and t_ada, no decoder params initially
-            optimizer = torch.optim.AdamW([params_group1, params_group2])
             # t_ada = 1 - alpha_ada  # Initialize t_ada as 1 - alpha_ada
             
         
@@ -720,6 +738,9 @@ def solve(config_name: str) -> None:
                         
                     # optimizer.param_groups[0]['lr'] = lr[block_to_unfreeze_idx]
                     optimizer.param_groups[0]['lr'] = lr_z[block_to_unfreeze_idx+1]
+                    if not is_calibrate:
+                        optimizer.param_groups[2]['lr'] = lr_z[block_to_unfreeze_idx+1]/1E3
+                        
                     # for param_group_idx in range(1, block_to_unfreeze_idx + 1):
                     #     # Update the learning rate for previously added decoder blocks
                     #     if optimizer.param_groups[-param_group_idx]['lr'] != 0.0:
@@ -738,7 +759,10 @@ def solve(config_name: str) -> None:
                 # torch.cuda.reset_peak_memory_stats()
                 with torch.amp.autocast("cuda", dtype=data_type):
                     temp_alpha = torch.sigmoid((alpha_ada-0.5)*6)
-                    temp_z = (1-temp_alpha) * z + temp_alpha * latent_y
+                    if not is_calibrate:
+                        temp_z = (1-temp_alpha) * z + temp_alpha * (latent_y + 0.2 * torch.tanh(res_y))
+                    else:
+                        temp_z = (1-temp_alpha) * z + temp_alpha * latent_y
                     x_t = checkpoint(checkpointed_integrate, temp_z)
                     decoded_output = decode(x_t)
 
@@ -748,10 +772,17 @@ def solve(config_name: str) -> None:
                         operator_decoded_output = operator.forward(decoded_output)
 
                     loss = criterion(operator_decoded_output, y_n)
-                    encoded = encode(decoded_output)
-                    loss += vae_weight * criterion(x_t, encoded)
-                    loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
-                    loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
+                    # if not is_calibrate:
+                    #     with torch.no_grad():
+                    #         z_stat = reg_net(temp_z, t_ada.expand(temp_z.shape[0], 1))
+                    #         z_mean, z_var = z_stat[...,0], z_stat[...,1]
+                    #     z_var = z_var.to(dtype=temp_z.dtype, device=temp_z.device)
+                    #     z_mean = z_mean.to(dtype=z_mean.dtype, device=z_mean.device)
+                    #     loss += 0.01 * ((temp_z.mean() - z_mean)**2 + (temp_z.var(unbiased=False) - z_var)**2).mean()
+                    # encoded = encode(decoded_output)
+                    # loss += vae_weight * criterion(x_t, encoded)
+                    # loss += lpips_weight * percep_loss_fn((operator_decoded_output + 1.0) / 2.0, (y_n + 1.0) / 2.0)
+                    # loss += TV_reg_weight * L1_tv(decoded_output) / L2_tv(decoded_output) / decoded_output.numel() / 2.0
                     loss *= loss_multiplier
                 
                 loss = loss.float()
@@ -792,10 +823,10 @@ def solve(config_name: str) -> None:
             
             # Evaluate
             with torch.no_grad():
-                # z_reg = gauss_sphere_reg(z) if is_gauss_reg else z
                 with torch.amp.autocast("cuda", dtype=data_type):
+                    z_reg = gauss_sphere_reg(z) if is_gauss_reg else z
                     temp_alpha = torch.sigmoid((alpha_ada-0.5)*6)
-                    temp_z = (1-temp_alpha) * z + temp_alpha * latent_y
+                    temp_z = (1-temp_alpha) * z_reg + temp_alpha * latent_y
                     x_t = checkpoint(checkpointed_integrate, temp_z)
                     decoded_output = decode(x_t)
                 output = decoded_output.detach().float()

@@ -1,0 +1,2 @@
+time,task,dataset,psnr,ssim,lpips,dists,clipiqa,musiq
+gaussian_deblurring,gaussian_deblurring,AFHQ,28.236507049597243,0.7620206,0.28005131959915164,0.16663610458374023,0.589091722369194,56.45346710205078

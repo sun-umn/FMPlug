@@ -61,17 +61,27 @@ def set_seed(seed):
 
 set_seed(123)  # Set a fixed seed for reproducibility
 
-def chi_regularization_tensor(z):
-    # z: (batch_size, C, H, W)
+def chi_regularization_tensor(z, normalize=True):
+    # z: (B, C, H, W)
     batch_size = z.shape[0]
-    dim = z[0].numel()  # C * H * W
+    dim = z[0].numel()  # d = C * H * W
 
-    z_flat = z.view(batch_size, -1)  # (B, dim)
-    norm = torch.norm(z_flat, dim=1)  # (B,)
-    
-    # Avoid log(0)
-    reg = (dim - 1) * torch.log(norm + 1e-8) - 0.5 * norm ** 2
-    return -reg.mean()  # negative log-likelihood of chi distribution
+    z_flat = z.view(batch_size, -1)  # (B, d)
+    norm = torch.norm(z_flat, dim=1)  # ||z|| per sample, shape (B,)
+
+    # Clamp the Gaussian part for numerical stability
+    gaussian_term = torch.clamp(0.5 * norm ** 2, min=-1e6, max=1e6)
+
+    reg = -gaussian_term + (dim - 1) * torch.log(norm + 1e-8)
+
+    if normalize:
+        reg = reg / dim  # prevent scaling with dimension
+
+    # Negative log-likelihood as regularizer
+    return -reg.mean()
+
+
+
 
 
 def relative_l1_loss(pred, target, eps=1e-5):
@@ -589,9 +599,9 @@ def solve(config_name: str) -> None:
             # else:
             #     z = encode(img)
             with torch.amp.autocast("cuda", dtype=data_type):
-                # z = inversion(img, [prompt], NFE=NFE, cfg_scale=guidance_scale, batch_size=1)
-                z = encode(img)
-                z = alpha * z + (1 - alpha) * torch.randn_like(z)
+                z = inversion(img, [prompt], NFE=NFE, cfg_scale=guidance_scale, batch_size=1)
+                # z = encode(img)
+                z = math.sqrt(alpha) * z + math.sqrt(1 - alpha) * torch.randn_like(z).detach()
             # z = z.detach()
         
         del img
@@ -733,7 +743,7 @@ def solve(config_name: str) -> None:
             with torch.amp.autocast("cuda", dtype=data_type):
                 x_t = checkpoint(checkpointed_integrate, z)
                 x_t = (x_t / vae.config.scaling_factor) + vae.config.shift_factor
-                decoded_output = torch.sin(vae.decode(x_t).sample)
+                decoded_output = vae.decode(x_t).sample
 
                 if measure_config['operator']['name'] == 'inpainting':
                     operator_decoded_output = operator.forward(decoded_output, mask=mask)
@@ -817,7 +827,8 @@ def solve(config_name: str) -> None:
             
             # Evaluate
             with torch.no_grad():
-                output = decoded_output.detach().float()
+                with torch.amp.autocast("cuda", dtype=data_type):
+                    output = decode(z).detach().float()
                 lpips_score = lpips_loss_fn(output, ref_img).mean()
                 output_numpy = np.clip((output.cpu().squeeze().numpy() + 1) / 2, 0, 1)
                 output_numpy = np.transpose(
