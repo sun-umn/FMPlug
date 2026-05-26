@@ -11,19 +11,17 @@ import numpy as np
 import skimage
 import matplotlib.pyplot as plt
 
-
-def get_mgrid(img_shape):
-    '''Generates a flattened grid of (x,y,...) coordinates in a range of -1 to 1.
-    sidelen: int
-    dim: int'''
-    # tensors = tuple(dim * [torch.linspace(-1, 1, steps=sidelen)])
-    # mgrid = torch.stack(torch.meshgrid(*tensors), dim=-1)
-    # mgrid = mgrid.reshape(-1, dim)
-    x, y = np.meshgrid(np.linspace(0, 1, img_shape[-2]), np.linspace(0, 1, img_shape[-1]))
-    # Reshape the mesh grid into (64*128, 2)
-    mgrid = np.column_stack([x.flatten(), y.flatten()])
+def get_mgrid(img_shape, device=None):
+    H, W = img_shape[-2], img_shape[-1]
+    x = np.linspace(-1, 1, W)
+    y = np.linspace(-1, 1, H)
+    xv, yv = np.meshgrid(x, y, indexing='xy')
+    mgrid = np.column_stack([xv.flatten(), yv.flatten()])
     mgrid = torch.from_numpy(mgrid).float()
+    if device:
+        mgrid = mgrid.to(device)
     return mgrid
+
 
 
 def laplace(y, x):

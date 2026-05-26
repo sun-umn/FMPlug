@@ -1,0 +1,37 @@
+measurement:
+  operator:
+    name: scatter
+    scale_factor: 1
+    
+fmplug:
+  save_folder: "/scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-W-R-scatter"
+  img_size: 512
+
+  method: "heun2"
+  alpha: 0.5
+  t_end: 0.00
+  NFE: 3
+  batch_size: 1
+  guidance_scale: 0.0
+  lr_z: [0.1]
+  lr_dec: []
+  lr_alpha_ada: 0.05
+  lr_prior_weight: 0.005
+  decay_factor: 0.98
+  epochs: 1000
+  loss_multiplier: 1000.0
+  vae_weight: 0.0
+  lpips_weight: 0.0
+  TV_reg_weight: 0.0
+  is_gauss_reg: True
+  is_calibrate: False
+  loss_fn: "mse"
+  data_type: torch.float32
+  optimizer_select: "adam"
+  
+  es_window_size: 50
+  es_patience: 50
+  es_min_epochs: 20
+  es_delta: 0.0
+
+  finetune_decoder_blocks_interval: 20

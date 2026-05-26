@@ -165,12 +165,23 @@ class BlindBlurOperator(LinearOperator):
         return data
     
     def apply_kernel(self, data, kernel):
-        #TODO: faster way to apply conv?:W
+        """
+        Apply blur kernel to each channel efficiently with grouped convolution.
+        Args:
+            data: (B, C, H, W) tensor
+            kernel: (1, 1, kH, kW) or (B, 1, kH, kW) blur kernel
+        Returns:
+            Blurred image: (B, C, H, W)
+        """
+        B, C, H, W = data.shape
+        kH, kW = kernel.shape[-2:]
         
-        b_img = torch.zeros_like(data).to(self.device)
-        for i in range(3):
-            b_img[:, i, :, :] = F.conv2d(data[:, i:i+1, :, :], kernel, padding='same')
-        return b_img
+        # Expand kernel to apply per-channel via groups
+        kernel = kernel.expand(C, 1, kH, kW)  # (C, 1, kH, kW)
+        
+        # Grouped conv applies each kernel to one channel independently
+        blurred = F.conv2d(data, kernel, padding='same', groups=C)
+        return blurred
 
 @register_operator(name='turbulence')
 class TurbulenceOperator(LinearOperator):

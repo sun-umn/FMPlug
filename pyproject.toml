@@ -1,0 +1,57 @@
+[project]
+name = "fmplug"
+version = "0.1.0"
+description = "Official code for FMPlug: Plug-and-Play Flow Matching for Image Inverse Problems"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "accelerate>=0.33.0",
+    "click>=8.1.0",
+    "diffusers>=0.30.0",
+    "flow-matching>=1.0.0",
+    "h5py>=3.10.0",
+    "huggingface-hub>=0.24.0",
+    "lmdb>=1.4.0",
+    "lpips>=0.1.4",
+    "matplotlib>=3.7.0",
+    "numpy>=1.24.0",
+    "opencv-python-headless>=4.8.0",
+    "packaging>=23.0",
+    "pandas>=2.0.0",
+    "pillow>=10.0.0",
+    "piq>=0.8.0",
+    "protobuf>=4.25.0",
+    "pyyaml>=6.0.0",
+    "requests>=2.31.0",
+    "safetensors>=0.4.0",
+    "scikit-image>=0.21.0",
+    "scipy>=1.10.0",
+    "sentencepiece>=0.2.0",
+    "sigpy>=0.1.26",
+    "torch>=2.3.0",
+    "torchmetrics>=1.4.0",
+    "torchvision>=0.18.0",
+    "tqdm>=4.66.0",
+    "transformers>=4.42.0",
+    "wandb>=0.22.0",
+]
+
+[project.scripts]
+fmplug = "run_fmplug:cli"
+fmplug-scientific = "cli_mri:cli"
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu121", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+    { index = "pytorch-cu121", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]

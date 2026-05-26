@@ -1,0 +1,46 @@
+measurement:
+  noise: 
+    name: gaussian
+    sigma: 0.03
+  operator:
+    name: motion_blur
+    kernel_size: 61
+    intensity: 0.5
+  kernel_opt: 
+    kernel: motion
+    kernel_size: 61
+    intensity: 0.5
+
+fmplug:
+  data_folder: ./example
+  save_folder: "./experiment-FMPlug"
+  img_size: 512
+
+  method: "heun2"
+  alpha: 0.8
+  t_end: 0.00
+  NFE: 3
+  batch_size: 1
+  guidance_scale: 0.0
+  lr_z: [0.5]
+  lr_dec: []
+  lr_t_ada: 0.01
+  lr_alpha_ada: 0.005
+  decay_factor: 1.0
+  epochs: 1000
+  loss_multiplier: 1.0
+  vae_weight: 0.0
+  lpips_weight: 0.0
+  TV_reg_weight: 0.0
+  is_gauss_reg: False
+  is_calibrate: True
+  loss_fn: "mse"
+  data_type: torch.bfloat16
+  optimizer_select: "adam"
+  
+  es_window_size: 50
+  es_patience: 50
+  es_min_epochs: 100
+  es_delta: 0.000000001
+
+  finetune_decoder_blocks_interval: 100

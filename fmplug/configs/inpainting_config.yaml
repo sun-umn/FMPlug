@@ -1,0 +1,44 @@
+fmplug:
+  NFE: 3
+  TV_reg_weight: 0.0
+  alpha: 0.5
+  batch_size: 1
+  data_folder: ./example
+  data_type: torch.bfloat16
+  decay_factor: 1.0
+  epochs: 1000
+  es_delta: 0.000005
+  es_min_epochs: 100
+  es_patience: 50
+  es_window_size: 50
+  finetune_decoder_blocks_interval: 100
+  guidance_scale: 0.0
+  img_size: 512
+  is_gauss_reg: False
+  is_calibrate: True
+  loss_fn: mse
+  loss_multiplier: 1000.0
+  lpips_weight: 0.0
+  lr_alpha_ada: 0.005
+  lr_dec: []
+  lr_t_ada: 0.005
+  lr_z:
+  - 0.5
+  method: heun2
+  optimizer_select: adam
+  save_folder: "./experiment-FMPlug"
+  t_end: 0.0
+  vae_weight: 0.0
+
+measurement:
+  mask_opt:
+    image_size: 512
+    mask_prob_range:
+    - 0.7
+    - 0.7
+    mask_type: random
+  noise:
+    name: gaussian
+    sigma: 0.03
+  operator:
+    name: inpainting

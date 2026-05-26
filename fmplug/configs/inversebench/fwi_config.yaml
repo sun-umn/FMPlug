@@ -1,0 +1,40 @@
+fmplug:
+  project_name: FWI-FT
+  NFE: 3
+  TV_reg_weight: 0.0
+  alpha: 0.5
+  batch_size: 1
+  data_type: torch.float32
+  decay_factor: 1.0
+  epochs: 1000
+  es_delta: 3000.0
+  es_min_epochs: 20
+  es_patience: 50
+  es_window_size: 50
+  guidance_scale: 0.0
+  img_size: 512
+  is_calibrate: False
+  is_gauss_reg: True
+  loss_fn: mse
+  loss_multiplier: 1.0
+  lpips_weight: 0.0
+
+  lr_alpha_ada: 0.005
+  lr_prior_weight: 0.05
+  lr_shift: 0.001
+  lr_z: [0.01]
+  # lr_z: [0.01, 0.005, 0.002, 0.001]
+
+  lr_dec: []
+  # lr_dec: []
+  finetune_decoder_blocks_interval: 40
+
+  method: heun2
+  optimizer_select: adam
+  save_folder: /scratch.global/wan01530/FMPlug/experiment-FMPlug-OT-W-R-FWI
+  t_end: 0.0
+  vae_weight: 0.0
+measurement:
+  operator:
+    name: fwi
+    scale_factor: 1
