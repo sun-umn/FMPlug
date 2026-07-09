@@ -15,13 +15,11 @@ fmplug:
   guidance_scale: 0.0
   img_size: 512
   is_gauss_reg: False
-  is_calibrate: True
   loss_fn: mse
   loss_multiplier: 1000.0
   lpips_weight: 0.0
   lr_alpha_ada: 0.005
   lr_dec: []
-  lr_t_ada: 0.005
   lr_z:
   - 0.5
   method: heun2

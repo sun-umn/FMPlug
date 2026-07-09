@@ -53,6 +53,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 Create and synchronize the Python environment:
 
 ```bash
+uv python pin 3.9
+uv venv --python 3.9
 uv sync
 ```
 

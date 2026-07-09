@@ -32,7 +32,6 @@ fmplug:
   lpips_weight: 0.0
   TV_reg_weight: 0.0
   is_gauss_reg: True
-  is_calibrate: False
   loss_fn: "mse"
   data_type: torch.bfloat16
   optimizer_select: "adam"

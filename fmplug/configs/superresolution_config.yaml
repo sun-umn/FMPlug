@@ -20,7 +20,6 @@ fmplug:
   guidance_scale: 0.0
   lr_z: [0.5]
   lr_dec: []
-  lr_t_ada: 0.005
   lr_alpha_ada: 0.005
   decay_factor: 1.0
   epochs: 1000
@@ -37,6 +36,6 @@ fmplug:
   es_window_size: 50
   es_patience: 50
   es_min_epochs: 100
-  es_delta: 0.00000002
+  es_delta: 0.000001
 
   finetune_decoder_blocks_interval: 100

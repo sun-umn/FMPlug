@@ -56,7 +56,6 @@ def integrate(
     NFE,
     prompt_embedding,
     pooled_prompt_embedding,
-    is_calibrate,
     device,
     guidance_scale: float = 7.0,
     method: str = "heun2"
@@ -186,7 +185,6 @@ def solve(config_name: str) -> None:
     loss_multiplier = fmplug_config["loss_multiplier"]
     loss_fn = fmplug_config["loss_fn"]
     is_gauss_reg = fmplug_config["is_gauss_reg"]
-    is_calibrate = fmplug_config["is_calibrate"]
     t_end = fmplug_config["t_end"]
     data_type = eval(fmplug_config["data_type"])
     optimizer_select = fmplug_config["optimizer_select"]
@@ -210,18 +208,17 @@ def solve(config_name: str) -> None:
         base_dir = os.path.dirname(gt_path)
         prompt_path = os.path.join(base_dir, "prompt.txt")
 
+        # Always compute a safe relative output directory, even if prompt.txt is missing.
+        rel_path = os.path.relpath(gt_path, start=data_folder)
+        rel_dir = os.path.dirname(rel_path) or "."
+
         if os.path.exists(prompt_path):
             with open(prompt_path, "r", encoding="utf-8") as f:
                 prompt = f.read().strip()
-
-            # Get relative path starting from `task`
-            rel_path = os.path.relpath(gt_path, start=data_folder)
-
-            rel_dir = os.path.dirname(rel_path) 
-
         else:
-            print(f"Warning: prompt.txt not found for {gt_path}")
-            prompt = None
+            print(f"Warning: prompt.txt not found for {gt_path}; using an empty prompt.")
+            prompt = ""
+
         gt_img = Image.open(gt_path).convert("RGB")
 
         tf = transforms.Compose(
@@ -407,8 +404,8 @@ def solve(config_name: str) -> None:
                 t,
                 NFE,
                 prompt_embedding,
-                pooled_embedding,
-                is_calibrate, device,
+                pooled_embedding, 
+                device,
                 guidance_scale=guidance_scale,
                 method=method
             )
@@ -468,19 +465,13 @@ def solve(config_name: str) -> None:
             loss = optimizer.step(closure)
             new_lr = lr_alpha_ada * (decay_factor ** iterator)
             optimizer.param_groups[1]['lr'] = new_lr
-            
-            peak_allocated = torch.cuda.max_memory_allocated() / 1024 / 1024 / 1024
-            peak_reserved = torch.cuda.max_memory_reserved() / 1024 / 1024 / 1024
-
-            print(f"Peak Allocated: {peak_allocated:.2f} GB")
-            print(f"Peak Reserved:  {peak_reserved:.2f} GB")    
+             
 
             t_ada = (1 - torch.sigmoid((alpha_ada-0.5)*6))
             
             grad_norm = z.grad.norm().item()
             delta = (z - z_prev).norm().item()
             rel_update = delta / (z_prev.norm() + 1e-8)
-            print(f"z.grad norm: {grad_norm}")
 
             z_grad_norms.append(grad_norm)
             z_deltas.append(delta)
