@@ -461,11 +461,12 @@ def integrate(
     sigma = temp_t / 1000
     sigma_next = temp_t_next / 1000
     zt = z
-        
-    latent_model_input = torch.cat([zt] * 2) if do_classifier_free_guidance else zt
 
     for i in range(NFE):
-        
+        # Rebuilt from the current zt every step, not just once before the
+        # loop, so each step feeds the latent produced by the previous step.
+        latent_model_input = torch.cat([zt] * 2) if do_classifier_free_guidance else zt
+
         time_step = temp_t.expand(latent_model_input.shape[0])
         time_step_next = temp_t_next.expand(latent_model_input.shape[0])
         if method == 'euler':
